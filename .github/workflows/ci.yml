@@ -1,0 +1,235 @@
+# Transaction Manager CI
+#
+# This pipeline runs on every push and every pull request. It enforces:
+#   - Clean build (go build ./...)
+#   - go vet zero warnings
+#   - gofmt clean (no unformatted files)
+#   - Full test suite with the race detector enabled (ubuntu + macOS matrix)
+#   - Coverage does not drop below the baseline threshold
+#   - govulncheck reports no known-CVE dependencies (pinned version)
+#   - golangci-lint zero-warning policy
+#   - Frontend builds (npm ci + tsc + vite build)
+#   - Container image builds and boots; base image scanned with Trivy
+#   - Version tag is created only after the image is validated
+# A failure on any job blocks the merge.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: golangci-lint (zero-warning)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  build-and-test:
+    name: Build + vet + test (race)
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify module is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: gofmt check
+        # L-INF-2: previously CI allowed unformatted files; enforce `gofmt -l`
+        # produces no output before any further step runs.
+        run: |
+          if [ -n "$(gofmt -l . | grep -v '^web/node_modules')" ]; then
+            echo "::error::Unformatted Go files (run: make fmt)"
+            gofmt -l . | grep -v '^web/node_modules'
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet (zero-warning policy)
+        run: go vet $(go list ./... | grep -v /web/node_modules)
+
+      - name: Test with race detector
+        run: go test $(go list ./... | grep -v /web/node_modules) -race -count=1 -timeout 300s
+
+  coverage:
+    name: Coverage (fail-below-baseline)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Coverage
+        run: |
+          PKGS=$(go list ./... | grep -v /web/node_modules | tr '\n' ' ')
+          go test $PKGS -count=1 -coverprofile=coverage.out -coverpkg=$(echo $PKGS | tr ' ' ',')
+          COV=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}')
+          echo "Total coverage: $COV"
+          COV_NUM=${COV%\%}
+          awk -v c="$COV_NUM" 'BEGIN{ if (c+0 < 65.0) { print "::error::Coverage " c "% is below 65.0% baseline"; exit 1 }; exit 0 }'
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage.out
+          retention-days: 14
+
+  fuzz:
+    name: Fuzz smoke
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./internal/types -fuzz=FuzzValue_Compare -fuzztime=30s -run='^$'
+      - run: go test ./api -fuzz=FuzzParseTxnID -fuzztime=30s -run='^$'
+      - run: go test ./api -fuzz=FuzzIsolationFromString -fuzztime=30s -run='^$'
+
+  security:
+    name: govulncheck
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # L-INF-3: pin govulncheck so the toolchain does not silently change
+      # between CI runs and so a compromised or breaking upstream release
+      # does not silently disable this signal.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      - name: Run govulncheck (fail on any CVE)
+        run: |
+          govulncheck ./... || {
+            echo "::error::govulncheck reported known-vulnerable dependencies"
+            exit 1
+          }
+
+  frontend-build:
+    name: Frontend build (tsc + vite)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx tsc --noEmit
+
+  container:
+    name: Container image build + smoke + scan
+    needs: [build-and-test, frontend-build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - name: Build server image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: txn-manager:ci
+          load: true
+      # L-INF-4: replace racy `sleep 2` with a health-poll loop that
+      # retries for up to 30 s, capturing the container id explicitly so
+      # cleanup runs regardless of curl outcome.
+      - name: Smoke-test the image boots (with retry)
+        env:
+          CONTAINER: ""
+        run: |
+          set -e
+          CID=$(docker run --rm -d -p 18080:8080 txn-manager:ci)
+          trap 'docker stop $CID 2>/dev/null || true' EXIT
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:18080/healthz >/dev/null 2>&1 && \
+               curl -fsS http://localhost:18080/readyz  >/dev/null 2>&1; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ $ok -ne 1 ]; then
+            echo "::error::container /healthz or /readyz did not return 200 within 30 s"
+            docker logs $CID || true
+            exit 1
+          fi
+      # L-INF-8 / L-INF-19: scan the built image for HIGH/CRITICAL OS CVEs.
+      - name: Trivy image scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: txn-manager:ci
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+  version-tag:
+    name: Tag version on main merge
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [container, coverage, fuzz, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compute version
+        id: v
+        run: |
+          # CT-25: include the run number so two same-day merges do not
+          # collide on the same tag (e.g. v20260722-abc1234 was the old
+          # date+sha format; the second same-day push failed `git tag`).
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=${GITHUB_SHA::7}
+          echo "tag=v${DATE}-${SHORT_SHA}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+      - name: Create tag
+        run: |
+          git tag "${{ steps.v.outputs.tag }}"
+          git push origin "${{ steps.v.outputs.tag }}"
