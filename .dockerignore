@@ -1,0 +1,26 @@
+# Build artifacts & caches
+/bin/
+/coverage.out
+*.test
+*.prof
+
+# VCS
+.git/
+.gitignore
+
+# Frontend — never build into the Go image
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Local dev artifacts
+tmp/
+*.log
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
