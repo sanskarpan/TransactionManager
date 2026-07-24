@@ -202,7 +202,7 @@ jobs:
           fi
       # L-INF-8 / L-INF-19: scan the built image for HIGH/CRITICAL OS CVEs.
       - name: Trivy image scan (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: txn-manager:ci
           severity: HIGH,CRITICAL

@@ -152,7 +152,10 @@ func FuzzParseTxnID(f *testing.F) {
 	f.Add("1e3")
 	f.Fuzz(func(t *testing.T, raw string) {
 		srv := newAPIServer(t)
-		req := httptest.NewRequest(http.MethodGet, "/api/txn/"+raw+"/status", http.NoBody)
+		req, err := http.NewRequest(http.MethodGet, "/api/txn/"+raw+"/status", http.NoBody)
+		if err != nil {
+			return
+		}
 		w := httptest.NewRecorder()
 		srv.ServeHTTP(w, req)
 		assert.NotEqual(t, http.StatusInternalServerError, w.Code)
