@@ -173,19 +173,19 @@ func TestH05_Healthz_Readyz(t *testing.T) {
 
 	// healthz always 200.
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// readyz: SetReadyForTest(true) was called in the helper.
 	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// A fresh server (not marked ready) returns 503.
 	srv2 := newTestServerWithConfig(t, api.ServerConfig{})
 	srv2.SetReadyForTest(false)
 	w = httptest.NewRecorder()
-	srv2.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	srv2.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody))
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 }
 
@@ -392,7 +392,7 @@ func TestH21_CORS_ReflectsAllowlistedOrigin(t *testing.T) {
 	srv := newTestServerWithConfig(t, api.ServerConfig{CORSAllowOrigins: []string{"https://app.example.com"}})
 
 	// Allowlisted origin → reflected.
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
 	req.Header.Set("Origin", "https://app.example.com")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -400,7 +400,7 @@ func TestH21_CORS_ReflectsAllowlistedOrigin(t *testing.T) {
 	assert.Contains(t, w.Header().Get("Vary"), "Origin")
 
 	// Non-allowlisted origin → no ACAO (fail closed).
-	req2 := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
 	req2.Header.Set("Origin", "https://evil.example.com")
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, req2)

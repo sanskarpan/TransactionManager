@@ -117,17 +117,17 @@ func (m *Manager) nextTxnID() ID {
 // (for MVCC + non-ReadCommitted) takes a snapshot of the active set so
 // RR / Serializable reads see a consistent view. The lockTimeout defaults
 // to 5s when zero; the returned txn is active and ready for read/write.
-func (m *Manager) Begin(protocol ConcurrencyProtocol, isolation IsolationLevel, lockTimeout time.Duration) (*Transaction, error) {
+func (m *Manager) Begin(protocol ConcurrencyProtocol, isoLevel IsolationLevel, lockTimeout time.Duration) (*Transaction, error) {
 	if lockTimeout == 0 {
 		lockTimeout = 5 * time.Second
 	}
 
 	id := m.nextTxnID()
-	txn := NewTransaction(id, protocol, isolation, lockTimeout)
+	txn := NewTransaction(id, protocol, isoLevel, lockTimeout)
 
 	m.mu.Lock()
 	// Take MVCC snapshot if needed
-	if protocol == ProtocolMVCC && isolation != ReadCommitted {
+	if protocol == ProtocolMVCC && isoLevel != ReadCommitted {
 		txn.Snapshot = m.takeSnapshot()
 	}
 	m.txns[id] = txn

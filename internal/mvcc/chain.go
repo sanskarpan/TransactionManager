@@ -56,7 +56,7 @@ func (c *VersionChain) All() []*Version {
 }
 
 // SetXMax sets XMax on the version with XMin == xmin.
-func (c *VersionChain) SetXMax(xmin TxnID, xmax TxnID) bool {
+func (c *VersionChain) SetXMax(xmin, xmax TxnID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for v := c.head; v != nil; v = v.Prev {

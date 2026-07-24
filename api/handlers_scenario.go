@@ -79,11 +79,12 @@ func (s *Server) handleRunScenario(w http.ResponseWriter, r *http.Request) {
 		Note      string      `json:"note,omitempty"`
 	}
 	steps := make([]stepDTO, 0, len(result.Steps))
-	for _, st := range result.Steps {
+	for i := range result.Steps {
 		// H-22: route step errors through the public-response sanitizer so
 		// internal package paths / txn IDs / lock-state strings are not
 		// leaked to the caller. AGENTS.md mandates errWrite for sanitized
 		// output; the step field previously copied st.Error.Error() verbatim.
+		st := &result.Steps[i]
 		errStr := ""
 		if st.Error != nil {
 			_, errStr = errToPublicResponse(st.Error)

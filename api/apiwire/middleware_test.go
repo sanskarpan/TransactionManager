@@ -103,7 +103,7 @@ func TestRateLimit_Disabled(t *testing.T) {
 	})
 	h := mw(next)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -116,7 +116,7 @@ func TestRateLimit_Allowed(t *testing.T) {
 	h := mw(next)
 
 	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 		req.RemoteAddr = "192.168.1.1:12345"
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -130,13 +130,13 @@ func TestRateLimit_Exceeded(t *testing.T) {
 	})
 	h := mw(next)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "10.0.0.1:9999"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req2.RemoteAddr = "10.0.0.1:9999"
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)
@@ -150,9 +150,9 @@ func TestRateLimit_MultipleClients(t *testing.T) {
 	})
 	h := mw(next)
 
-	client1 := httptest.NewRequest(http.MethodGet, "/", nil)
+	client1 := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	client1.RemoteAddr = "10.0.0.1:1111"
-	client2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	client2 := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	client2.RemoteAddr = "10.0.0.2:2222"
 
 	for i := 0; i < 2; i++ {

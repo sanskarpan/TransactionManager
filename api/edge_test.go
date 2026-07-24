@@ -132,7 +132,7 @@ func TestEdge_ReadUnknownKey(t *testing.T) {
 // returns 405).
 func TestEdge_GETOnPOSTRoute(t *testing.T) {
 	srv := newAPIServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/txn/begin", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/txn/begin", http.NoBody)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
@@ -152,7 +152,7 @@ func FuzzParseTxnID(f *testing.F) {
 	f.Add("1e3")
 	f.Fuzz(func(t *testing.T, raw string) {
 		srv := newAPIServer(t)
-		req := httptest.NewRequest(http.MethodGet, "/api/txn/"+raw+"/status", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/txn/"+raw+"/status", http.NoBody)
 		w := httptest.NewRecorder()
 		srv.ServeHTTP(w, req)
 		assert.NotEqual(t, http.StatusInternalServerError, w.Code)
@@ -201,7 +201,7 @@ func TestEdge_MetricsNoCollector(t *testing.T) {
 	srv := NewServerWithConfig(mgr, dd, wfg, dlHistory, nil, nil, ServerConfig{})
 	srv.SetReadyForTest(true)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics", http.NoBody)
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	var m map[string]interface{}
@@ -287,7 +287,7 @@ func TestEdge_ReleaseSavepoint(t *testing.T) {
 	id := int(b["id"].(float64))
 	w = post(srv, "/api/txn/"+itoa(id)+"/savepoint", `{"name":"sp1"}`)
 	require.Equal(t, http.StatusOK, w.Code)
-	req := httptest.NewRequest(http.MethodDelete, "/api/txn/"+itoa(id)+"/savepoint/sp1", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/txn/"+itoa(id)+"/savepoint/sp1", http.NoBody)
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, req)
 	require.Equal(t, http.StatusOK, w2.Code)
@@ -298,7 +298,7 @@ func TestEdge_ReleaseSavepoint(t *testing.T) {
 func TestEdge_LockByResourceNotFound(t *testing.T) {
 	srv := newAPIServer(t)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/locks/nonexistent_table/nonexistent_key", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/locks/nonexistent_table/nonexistent_key", http.NoBody)
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	var r map[string]interface{}
@@ -320,7 +320,7 @@ func TestEdge_Vacuum(t *testing.T) {
 func TestEdge_MVCCStats(t *testing.T) {
 	srv := newAPIServer(t)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/mvcc/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/mvcc/stats", http.NoBody)
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	var r map[string]interface{}
@@ -333,7 +333,7 @@ func TestEdge_MVCCStats(t *testing.T) {
 func TestEdge_MetricsWithCollector(t *testing.T) {
 	srv := newAPIServer(t)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics", http.NoBody)
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	var m map[string]interface{}

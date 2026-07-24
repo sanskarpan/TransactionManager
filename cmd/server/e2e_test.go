@@ -138,7 +138,7 @@ func decodeMap(t *testing.T, data string) map[string]interface{} {
 
 func beginTxn(t *testing.T, protocol, isolation string) int {
 	t.Helper()
-	body := fmt.Sprintf(`{"protocol":"%s","isolation":"%s"}`, protocol, isolation)
+	body := fmt.Sprintf(`{"protocol":%q,"isolation":%q}`, protocol, isolation)
 	resp := e2ePost(t, "/api/txn/begin", body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("begin: status %d, body: %s", resp.StatusCode, readBody(t, resp))
@@ -342,7 +342,7 @@ func TestE2E_Savepoint(t *testing.T) {
 
 	// Release it
 	req, err := http.NewRequest(http.MethodDelete,
-		fmt.Sprintf("%s/api/txn/%d/savepoint/sp1", e2eBase, id), nil)
+		fmt.Sprintf("%s/api/txn/%d/savepoint/sp1", e2eBase, id), http.NoBody)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}

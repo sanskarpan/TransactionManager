@@ -33,7 +33,7 @@ func okJSON(w http.ResponseWriter, v interface{}) {
 // message). Internal implementation details (txn IDs, raw error strings,
 // stack traces) are NOT leaked to the caller. The caller is expected to
 // log the raw error with the request ID before calling this function.
-func errToPublicResponse(err error) (int, string) {
+func errToPublicResponse(err error) (code int, msg string) {
 	var txnErr *types.TxnError
 	if errors.As(err, &txnErr) {
 		switch txnErr.Code {

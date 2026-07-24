@@ -54,7 +54,7 @@ func TestCoverage_MarkReady(t *testing.T) {
 	srv := newAPIServer(t)
 	srv.SetReadyForTest(false)
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
@@ -102,7 +102,7 @@ func TestCoverage_handleLockByResource(t *testing.T) {
 
 	// No lock held yet — returns empty queue
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/locks/accounts/nonexistent", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/locks/accounts/nonexistent", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var empty map[string]interface{}
 	decodeJSONBody(t, w, &empty)
@@ -122,7 +122,7 @@ func TestCoverage_handleLockByResource(t *testing.T) {
 
 	// Lock queue should now have an entry
 	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/locks/accounts/1", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/locks/accounts/1", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var lockInfo map[string]interface{}
 	decodeJSONBody(t, w, &lockInfo)
@@ -135,7 +135,7 @@ func TestCoverage_handleDeadlocks(t *testing.T) {
 	srv := newAPIServer(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/deadlocks", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/deadlocks", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var result []interface{}
 	decodeJSONBody(t, w, &result)
@@ -146,7 +146,7 @@ func TestCoverage_handleWFG(t *testing.T) {
 	srv := newAPIServer(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/wfg", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/wfg", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var result map[string]interface{}
 	decodeJSONBody(t, w, &result)
@@ -158,7 +158,7 @@ func TestCoverage_handleMVCCStats(t *testing.T) {
 	srv := newAPIServer(t)
 
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/mvcc/stats", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/mvcc/stats", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var result map[string]interface{}
 	decodeJSONBody(t, w, &result)
@@ -169,7 +169,7 @@ func TestCoverage_handleMVCCStats(t *testing.T) {
 func TestCoverage_handleVacuum(t *testing.T) {
 	srv := newAPIServer(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/mvcc/vacuum", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/mvcc/vacuum", http.NoBody)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -241,7 +241,7 @@ func TestCoverage_handleBenchmarkResults(t *testing.T) {
 
 	// Unknown job → 404
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/benchmark/results/nonexistent", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/benchmark/results/nonexistent", http.NoBody))
 	require.Equal(t, http.StatusNotFound, w.Code)
 
 	// Running job → status "running"
@@ -250,7 +250,7 @@ func TestCoverage_handleBenchmarkResults(t *testing.T) {
 	srv.benchmarkJobsMu.Unlock()
 
 	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/benchmark/results/job-running", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/benchmark/results/job-running", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var res map[string]interface{}
 	decodeJSONBody(t, w, &res)
@@ -262,7 +262,7 @@ func TestCoverage_handleBenchmarkResults(t *testing.T) {
 	srv.benchmarkJobsMu.Unlock()
 
 	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/benchmark/results/job-done", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/benchmark/results/job-done", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	decodeJSONBody(t, w, &res)
 	assert.Equal(t, "done", res["status"])
@@ -283,7 +283,7 @@ func TestCoverage_handleReleaseSavepoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Release it (DELETE /api/txn/{id}/savepoint/{name}")
-	req := httptest.NewRequest(http.MethodDelete, "/api/txn/"+itoa(id)+"/savepoint/sp1", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/txn/"+itoa(id)+"/savepoint/sp1", http.NoBody)
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -293,13 +293,13 @@ func TestCoverage_handleReleaseSavepoint(t *testing.T) {
 	assert.Equal(t, true, result["released"])
 
 	// Error: unknown txn → 404
-	req = httptest.NewRequest(http.MethodDelete, "/api/txn/999999/savepoint/sp1", nil)
+	req = httptest.NewRequest(http.MethodDelete, "/api/txn/999999/savepoint/sp1", http.NoBody)
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 
 	// Error: non-existent savepoint → errWrite error
-	req = httptest.NewRequest(http.MethodDelete, "/api/txn/"+itoa(id)+"/savepoint/nonexistent", nil)
+	req = httptest.NewRequest(http.MethodDelete, "/api/txn/"+itoa(id)+"/savepoint/nonexistent", http.NoBody)
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
@@ -311,7 +311,7 @@ func TestCoverage_handleSSEEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req := httptest.NewRequest(http.MethodGet, "/sse/events", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodGet, "/sse/events", http.NoBody).WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	done := make(chan struct{})
@@ -346,7 +346,7 @@ func TestCoverage_handleSSEWFG(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req := httptest.NewRequest(http.MethodGet, "/sse/wfg", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodGet, "/sse/wfg", http.NoBody).WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	done := make(chan struct{})
@@ -474,7 +474,7 @@ func TestCoverage_handleDeadlocksNilHistory(t *testing.T) {
 	s.SetReadyForTest(true)
 
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/deadlocks", nil))
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/deadlocks", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var result []interface{}
 	decodeJSONBody(t, w, &result)
@@ -493,7 +493,7 @@ func TestCoverage_handleStatus(t *testing.T) {
 
 	// Status of active txn
 	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/txn/"+itoa(id)+"/status", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/txn/"+itoa(id)+"/status", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	var statusResp map[string]interface{}
 	decodeJSONBody(t, w, &statusResp)
@@ -506,7 +506,7 @@ func TestCoverage_handleStatus(t *testing.T) {
 
 	// Status of committed txn
 	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/txn/"+itoa(id)+"/status", nil))
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/txn/"+itoa(id)+"/status", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	decodeJSONBody(t, w, &statusResp)
 	assert.Equal(t, "committed", statusResp["status"])

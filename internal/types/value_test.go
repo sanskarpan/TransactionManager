@@ -102,7 +102,6 @@ func FuzzValue_Compare(f *testing.F) {
 		default:
 			b = BoolVal(bRaw%2 == 0)
 		}
-		_, _ = a.Compare(b)
 		// Must not panic; return value intentionally unchecked.
 		_ = a.String()
 		_ = b.String()

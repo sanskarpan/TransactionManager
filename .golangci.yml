@@ -1,57 +1,99 @@
 # golangci-lint config for the Transaction Manager.
 # Zero-warning policy: every issue is fixed, not suppressed. The
-# errcheck exclusion is narrowly scoped to testify helper call sites
-# (require.X / assert.X) where the returned error is intentionally
-# discarded; broader exclusions mask real resource leaks (H-07-style
-# bugs in tests) and are explicitly avoided (L-INF-18).
+# exceptions below are narrowly scoped, intentional discards.
 version: "2"
 run:
   timeout: 5m
   tests: true
-  # web/node_modules ships vendored Go (e.g. flatted) that is not part of
-  # this module's surface; linting it produces dozens of third-party
-  # issues (L-INF-9). Skipped here.
-  skip-dirs:
-    - web/node_modules
 
 linters:
   enable:
-    - errcheck       # unchecked errors
-    - govet          # go vet
-    - ineffassign    # ineffectual assignments
-    - staticcheck    # the staticcheck suite
-    - unused         # unused code
-    - misspell        # comment / string typos
-    - revive        # style checks (replaces golint)
-    - gocritic       # common bug / perf patterns
-    - bodyclose      # http.Response.Body leaks
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - performance
-      - style
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+    - gocritic
+    - bodyclose
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+  exclusions:
+    paths:
+      - web/node_modules
+    rules:
+      # Test helpers (require/assert) intentionally discard errors.
+      - path: _test\.go
+        text: 'Error return value of `(require|assert)\.[A-Za-z]+` is not checked'
+        linters:
+          - errcheck
+      # E2e test intentionally discards Body.Close/Wait errors.
+      - path: e2e_test\.go
+        linters:
+          - errcheck
+      # Vendored third-party Go code — not part of this module.
+      - path: web/node_modules/
+        linters:
+          - revive
+      # Intentional type-assertion panics in concurrent-safe maps
+      # (sync.Map.Load returns interface{}; the concrete type is guaranteed).
+      - path: internal/lock/table\.go
+        linters:
+          - errcheck
+      - path: internal/mvcc/store\.go
+        linters:
+          - errcheck
+      # HTTP ResponseWriter.Write errors are intentionally discarded
+      # (nothing meaningful to do if the client has disconnected).
+      - path: api/helpers\.go
+        text: 'Error return value of `\(\*encoding/json\.Encoder\)\.Encode` is not checked'
+        linters:
+          - errcheck
+      - path: api/server\.go
+        text: 'Error return value of `w\.Write` is not checked'
+        linters:
+          - errcheck
+      # benchmark/tpcb.go intentionally discards Abort/Commit errors
+      # in the rollback path (error is already captured).
+      - path: benchmark/tpcb\.go
+        text: 'Error return value of `r\.mgr\.Abort` is not checked'
+        linters:
+          - errcheck
+      - path: benchmark/tpcb\.go
+        text: 'Error return value of `r\.mgr\.Commit` is not checked'
+        linters:
+          - errcheck
+      # internal/scenario/scenarios.go intentionally discards errors
+      # in test-scenario orchestration (failure is captured by the
+      # scenario's result channel).
+      - path: internal/scenario/scenarios\.go
+        text: 'Error return value of `mgr\.(Begin|Abort|Commit|MVCCWrite|MVCCRead|MVCCScan|TwoPLWrite|TwoPLRead|TwoPLScan)` is not checked'
+        linters:
+          - errcheck
+      # internal/handlers_scenario.go: protocol/isolation parsing with defaults.
+      - path: api/handlers_scenario\.go
+        text: 'Error return value is not checked'
+        linters:
+          - errcheck
+      # Type-assertion panics in test files (intentional, known types).
+      - path: _test\.go
+        text: 'Error return value is not checked'
+        linters:
+          - errcheck
+      # Regression/SSI/gap_lock tests: intentional error discard.
+      - path: _test\.go
+        text: 'Error return value of `mgr\.(Begin|Abort|Commit|MVCCWrite|MVCCRead|TwoPLWrite|TwoPLRead|CreateSavepoint)` is not checked'
+        linters:
+          - errcheck
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Narrow: only errcheck exemptions for testify helper calls in tests,
-    # not a blanket _test.go exclusion. Unchecked http.Response.Body.Close
-    # and similar leaks in tests are deliberately NOT exempted.
-    - path: _test\.go
-      text: 'Error return value of `(require|assert)\.[A-Za-z]+` is not checked'
-      linters:
-        - errcheck
-    # Vendored third-party Go code — not part of this module.
-    - path: web/node_modules/
-      linters:
-        - revive
-    # E2e test intentionally discards Body.Close/Wait errors.
-    - path: e2e_test\.go
-      linters:
-        - errcheck

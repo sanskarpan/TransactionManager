@@ -16,7 +16,6 @@ func TestSnapshot_Contains(t *testing.T) {
 
 func TestSnapshot_IsCommitted(t *testing.T) {
 	snap := &Snapshot{Xmin: 10, Xmax: 20, Active: []ID{12}}
-	// id < Xmin = committed
 	assert.True(t, snap.IsCommitted(5))
 	// id = Xmin - not committed (Xmin is the oldest active)
 	assert.False(t, snap.IsCommitted(10))
