@@ -33,11 +33,11 @@ const (
 	// TableAccounts is the name of the accounts table in the TPC-B schema.
 	TableAccounts = "accounts"
 	// TableTellers is the name of the tellers table.
-	TableTellers  = "tellers"
+	TableTellers = "tellers"
 	// TableBranches is the name of the branches table.
 	TableBranches = "branches"
 	// TableHistory is the name of the history table.
-	TableHistory  = "history"
+	TableHistory = "history"
 )
 
 // Config controls the benchmark parameters.

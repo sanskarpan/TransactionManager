@@ -10,15 +10,15 @@ type ValueType int
 
 const (
 	// TypeNull represents a SQL NULL value.
-	TypeNull  ValueType = 0
+	TypeNull ValueType = 0
 	// TypeInt represents a 64-bit signed integer.
-	TypeInt   ValueType = 1
+	TypeInt ValueType = 1
 	// TypeFloat represents a 64-bit IEEE 754 float.
 	TypeFloat ValueType = 2
 	// TypeText represents a UTF-8 string.
-	TypeText  ValueType = 3
+	TypeText ValueType = 3
 	// TypeBool represents a boolean value.
-	TypeBool  ValueType = 4
+	TypeBool ValueType = 4
 )
 
 // Value is a dynamically-typed cell that can hold an int, float, text, bool, or null.

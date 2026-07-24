@@ -104,9 +104,11 @@ func isolationName(i txn.IsolationLevel) string {
 type DirtyReadScenario struct{}
 
 // ScenarioName returns the unique name of this scenario.
-func (s *DirtyReadScenario) ScenarioName() string     { return "dirty_read" }
+func (s *DirtyReadScenario) ScenarioName() string { return "dirty_read" }
+
 // AnomalyKind returns the anomaly type this scenario demonstrates.
 func (s *DirtyReadScenario) AnomalyKind() AnomalyType { return DirtyRead }
+
 // Describe returns a human-readable description of the scenario.
 func (s *DirtyReadScenario) Describe() string {
 	return "T1 writes a dirty value; T2 reads; T1 aborts. " +
@@ -168,9 +170,11 @@ func (s *DirtyReadScenario) Run(_ *txn.Manager, isolation txn.IsolationLevel, pr
 type LostUpdateScenario struct{}
 
 // ScenarioName returns the unique name of this scenario.
-func (s *LostUpdateScenario) ScenarioName() string     { return "lost_update" }
+func (s *LostUpdateScenario) ScenarioName() string { return "lost_update" }
+
 // AnomalyKind returns the anomaly type this scenario demonstrates.
 func (s *LostUpdateScenario) AnomalyKind() AnomalyType { return LostUpdate }
+
 // Describe returns a human-readable description of the scenario.
 func (s *LostUpdateScenario) Describe() string {
 	return "T1 and T2 both read balance, each writes a new value. " +
@@ -250,9 +254,11 @@ func (s *LostUpdateScenario) Run(_ *txn.Manager, isolation txn.IsolationLevel, p
 type NonRepeatableReadScenario struct{}
 
 // ScenarioName returns the unique name of this scenario.
-func (s *NonRepeatableReadScenario) ScenarioName() string     { return "non_repeatable_read" }
+func (s *NonRepeatableReadScenario) ScenarioName() string { return "non_repeatable_read" }
+
 // AnomalyKind returns the anomaly type this scenario demonstrates.
 func (s *NonRepeatableReadScenario) AnomalyKind() AnomalyType { return NonRepeatableRead }
+
 // Describe returns a human-readable description of the scenario.
 func (s *NonRepeatableReadScenario) Describe() string {
 	return "T1 reads a value twice; T2 updates and commits between reads. " +
@@ -315,9 +321,11 @@ func (s *NonRepeatableReadScenario) Run(_ *txn.Manager, isolation txn.IsolationL
 type PhantomReadScenario struct{}
 
 // ScenarioName returns the unique name of this scenario.
-func (s *PhantomReadScenario) ScenarioName() string     { return "phantom_read" }
+func (s *PhantomReadScenario) ScenarioName() string { return "phantom_read" }
+
 // AnomalyKind returns the anomaly type this scenario demonstrates.
 func (s *PhantomReadScenario) AnomalyKind() AnomalyType { return PhantomRead }
+
 // Describe returns a human-readable description of the scenario.
 func (s *PhantomReadScenario) Describe() string {
 	return "T1 scans a range; T2 inserts a new row and commits; T1 scans again. " +
@@ -383,9 +391,11 @@ func (s *PhantomReadScenario) Run(_ *txn.Manager, isolation txn.IsolationLevel, 
 type WriteSkewScenario struct{}
 
 // ScenarioName returns the unique name of this scenario.
-func (s *WriteSkewScenario) ScenarioName() string     { return "write_skew" }
+func (s *WriteSkewScenario) ScenarioName() string { return "write_skew" }
+
 // AnomalyKind returns the anomaly type this scenario demonstrates.
 func (s *WriteSkewScenario) AnomalyKind() AnomalyType { return WriteSkew }
+
 // Describe returns a human-readable description of the scenario.
 func (s *WriteSkewScenario) Describe() string {
 	return "Doctor on-call: both Alice and Bob are on-call. " +
@@ -450,9 +460,11 @@ func (s *WriteSkewScenario) Run(_ *txn.Manager, isolation txn.IsolationLevel, pr
 type DeadlockCycleScenario struct{}
 
 // ScenarioName returns the unique name of this scenario.
-func (s *DeadlockCycleScenario) ScenarioName() string     { return "deadlock_cycle" }
+func (s *DeadlockCycleScenario) ScenarioName() string { return "deadlock_cycle" }
+
 // AnomalyKind returns the anomaly type this scenario demonstrates.
 func (s *DeadlockCycleScenario) AnomalyKind() AnomalyType { return DeadlockCycle }
+
 // Describe returns a human-readable description of the scenario.
 func (s *DeadlockCycleScenario) Describe() string {
 	return "T1 holds lock on A, waits for B. T2 holds lock on B, waits for A. " +
@@ -566,9 +578,11 @@ func (s *DeadlockCycleScenario) Run(_ *txn.Manager, isolation txn.IsolationLevel
 type CascadeAbortScenario struct{}
 
 // ScenarioName returns the unique name of this scenario.
-func (s *CascadeAbortScenario) ScenarioName() string     { return "cascade_abort" }
+func (s *CascadeAbortScenario) ScenarioName() string { return "cascade_abort" }
+
 // AnomalyKind returns the anomaly type this scenario demonstrates.
 func (s *CascadeAbortScenario) AnomalyKind() AnomalyType { return CascadeAbort }
+
 // Describe returns a human-readable description of the scenario.
 func (s *CascadeAbortScenario) Describe() string {
 	return "T1 writes dirty; T2 reads T1's data; T1 aborts. " +

@@ -62,5 +62,3 @@ func TestMode_String(t *testing.T) {
 	assert.Equal(t, "U", LockU.String())
 	assert.Equal(t, "?", Mode(99).String())
 }
-
-

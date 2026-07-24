@@ -40,19 +40,19 @@ type AnomalyType string
 
 const (
 	// DirtyRead is the anomaly where one txn reads uncommitted data from another.
-	DirtyRead         AnomalyType = "dirty_read"
+	DirtyRead AnomalyType = "dirty_read"
 	// LostUpdate is the anomaly where a concurrent write overwrites another's update.
-	LostUpdate        AnomalyType = "lost_update"
+	LostUpdate AnomalyType = "lost_update"
 	// NonRepeatableRead is the anomaly where a value changes between two reads.
 	NonRepeatableRead AnomalyType = "non_repeatable_read"
 	// PhantomRead is the anomaly where new rows appear between two scans.
-	PhantomRead       AnomalyType = "phantom_read"
+	PhantomRead AnomalyType = "phantom_read"
 	// WriteSkew is the anomaly where two txns read a shared invariant and write oppositely.
-	WriteSkew         AnomalyType = "write_skew"
+	WriteSkew AnomalyType = "write_skew"
 	// DeadlockCycle is the anomaly where two txns wait for each other's locks.
-	DeadlockCycle     AnomalyType = "deadlock_cycle"
+	DeadlockCycle AnomalyType = "deadlock_cycle"
 	// CascadeAbort is the anomaly where one txn's abort causes another's reads to be invalid.
-	CascadeAbort      AnomalyType = "cascade_abort"
+	CascadeAbort AnomalyType = "cascade_abort"
 )
 
 // Step records a single operation in a scenario execution trace.

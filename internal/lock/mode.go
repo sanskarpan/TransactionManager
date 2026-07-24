@@ -8,19 +8,19 @@ type Mode int
 
 const (
 	// LockNL is the null lock (no lock held).
-	LockNL  Mode = 0
+	LockNL Mode = 0
 	// LockIS is the intention-shared lock (table-level).
-	LockIS  Mode = 1
+	LockIS Mode = 1
 	// LockIX is the intention-exclusive lock (table-level).
-	LockIX  Mode = 2
+	LockIX Mode = 2
 	// LockS is the shared lock (row-level).
-	LockS   Mode = 3
+	LockS Mode = 3
 	// LockSIX is the shared-intention-exclusive lock (table-level).
 	LockSIX Mode = 4
 	// LockX is the exclusive lock (row-level).
-	LockX   Mode = 5
+	LockX Mode = 5
 	// LockU is the update lock (reserved; not requested by any current caller).
-	LockU   Mode = 6
+	LockU Mode = 6
 )
 
 func (m Mode) String() string {

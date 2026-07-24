@@ -33,8 +33,8 @@ type Manager struct {
 	// holds m.mu.Lock when it calls applyMVCCUndo, and applyMVCCUndo
 	// must also be able to snapshot the epoch to protect its chain
 	// accesses (CT-28/29/30).
-	epochMu  sync.RWMutex
-	opEpoch  uint64
+	epochMu sync.RWMutex
+	opEpoch uint64
 
 	LockTable  *lock.Table
 	LockAcq    *lock.Acquirer
@@ -992,6 +992,7 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 	txn.addWrite(storage.RowKey(key))
 	return nil
 }
+
 // MVCCScan iterates every chain in the named table and returns the rows
 // visible to the transaction's snapshot, optionally filtered by the
 // supplied predicate. Like MVCCRead, Serializable-isolation scans are
