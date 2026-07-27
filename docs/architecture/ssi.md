@@ -1,93 +1,157 @@
 # Serializable Snapshot Isolation (SSI)
 
-## The problem SSI solves
+> **See also:** [ADR-0005 — SSI Serializable](../adr/0005-ssi-serializable.md) · [Write Skew scenario](../scenarios.md#write-skew) · [Isolation level reference](../deep-dives/isolation-levels.md)
 
-Snapshot isolation (Repeatable Read in MVCC) prevents dirty reads, non-repeatable reads, and phantoms — but it does **not** prevent **write skew**.
+## The anomaly SSI prevents: write skew
 
-Write skew occurs when two transactions each read a set of rows, make a decision based on those reads, and then write disjoint rows — neither write conflicts with the other, yet the combined result is impossible under any serial execution.
+Snapshot isolation (MVCC Repeatable Read) prevents dirty reads, non-repeatable reads,
+and phantoms. But it does not prevent **write skew**.
 
-**Classic example — two doctors on call:**
+**Write skew** occurs when two transactions:
+1. Each read an overlapping set of rows.
+2. Each write _disjoint_ rows based on those reads.
+3. The combined result violates a constraint that neither write alone would violate.
 
-```
-T1 reads: doctors_on_call = {Alice, Bob}  → decides Alice can go off call
-T2 reads: doctors_on_call = {Alice, Bob}  → decides Bob can go off call
+No write-write conflict exists (writes are to different keys), so snapshot isolation
+allows both to commit — but a serial execution of the two transactions would have
+prevented at least one from seeing the "bad" shared state.
 
-T1 writes: Alice.on_call = false
-T2 writes: Bob.on_call = false
-
-Result: 0 doctors on call — impossible if the constraint is "≥ 1 must be on call"
-```
-
-Neither write conflicts with the other's read, so snapshot isolation allows this.
-
-## How SSI detects it
-
-SSI extends snapshot isolation with lightweight conflict tracking. The key insight (from Cahill et al., 2008): every non-serializable execution under snapshot isolation exhibits a **dangerous structure** — a cycle of two **rw-anti-dependency** edges.
-
-An **rw-anti-dependency** edge T1 → T2 means:
-- T1 read a version of a row
-- T2 wrote a **later** version of that row (committed after T1's snapshot)
-
-SSI tracks these edges and aborts a transaction when a cycle of exactly two such edges is detected at commit time.
-
-## Implementation
-
-The `SSITracker` in `internal/isolation/ssi.go` maintains:
-
-- **SIREAD locks** — a set of keys each transaction has read, associated with the transaction.
-- **rw-anti-dependency graph** — directed edges between transactions.
+### Classic example — doctors on call
 
 ```
-RecordRead(txn, key):
-    add key to txn's SIREAD set
+Invariant: at least one doctor must be on call at all times.
 
-RecordWrite(writer, key):
-    for each reader that has a SIREAD lock on key:
-        add edge reader → writer
-        if writer already has an edge writer → X and X → reader:
-            cycle detected → abort writer (or reader at commit time)
+T1: READ  on_call                   → {Alice: true, Bob: true}
+T2: READ  on_call                   → {Alice: true, Bob: true}
 
-CheckCommit(txn):
-    if txn has an incoming rw-edge AND an outgoing rw-edge:
-        abort txn with ErrSSIConflict
+T1: WRITE Alice.on_call = false     (Bob is still on call — OK locally)
+T2: WRITE Bob.on_call   = false     (Alice is still on call — OK locally)
+
+T1: COMMIT   ← no write-write conflict
+T2: COMMIT   ← no write-write conflict
+
+Result: 0 doctors on call — invariant violated
 ```
 
-## When SSI fires
+---
+
+## Theoretical basis
+
+Cahill, Röhm, and Fekete (2008) proved: every non-serializable execution under snapshot
+isolation exhibits a **dangerous structure** — a cycle containing at least two consecutive
+**rw-anti-dependency** edges.
+
+An **rw-anti-dependency** edge `T1 → T2` means:
+- T1 read a version of a row (or a predicate range).
+- T2 wrote a _later_ version of that row/range after T1's snapshot.
+
+In the doctors example:
+- T1 reads Alice → T2 writes Alice → edge **T2 → T1** (T1 is the "earlier" reader, T2 is the later writer)
+- T2 reads Bob  → T1 writes Bob  → edge **T1 → T2**
+
+The two edges form a cycle: `T1 → T2 → T1`. SSI detects this at commit time and aborts
+one of the transactions.
+
+---
+
+## Implementation: SSITracker
+
+`internal/isolation/ssi.go` maintains two data structures per tracker:
+
+```
+siReads:  map[txnID] → set of keys read       // SIREAD "locks"
+edges:    directed graph (txnID → txnID)       // rw-anti-dependency edges
+```
+
+### RecordRead
+
+```
+RecordRead(reader T, key k):
+    siReads[T].add(k)
+
+    // Check if any committed writer has already written k after T's snapshot.
+    // If so, add an edge from that writer to T.
+    for each committed txn W that wrote k:
+        if W committed after T's snapshot:
+            edges.add(W → T)
+            if edges has cycle through T: abort T
+```
+
+### RecordWrite
+
+```
+RecordWrite(writer W, key k):
+    // Find all readers with a SIREAD lock on k.
+    for each txn R with k in siReads[R]:
+        if R's snapshot predates W:
+            edges.add(R → W)
+            if edges has cycle through W: mark W as conflicted
+```
+
+### CheckCommit
+
+```
+CheckCommit(txn T):
+    if T has at least one incoming rw-edge AND at least one outgoing rw-edge:
+        // T sits in the middle of a cycle: X → T → Y
+        abort T with ErrSSIConflict
+```
+
+---
+
+## Annotated example — write skew detected
 
 ```
 T1: BEGIN mvcc serializable
 T2: BEGIN mvcc serializable
+    (both take snapshots: Active=[T1,T2], Xmax=next)
 
-T1: READ  doctors where on_call=true  → SIREAD on {Alice, Bob}
-T2: READ  doctors where on_call=true  → SIREAD on {Alice, Bob}
+T1: SCAN doctors                 → siReads[T1] = {Alice, Bob}
+T2: SCAN doctors                 → siReads[T2] = {Alice, Bob}
 
 T1: WRITE Alice.on_call = false
-    → adds edge T2 → T1  (T2 had SIREAD on Alice, T1 wrote it)
+    RecordWrite(T1, "Alice"):
+        T2 ∈ siReads["Alice"] → add edge T2 → T1
 
 T2: WRITE Bob.on_call = false
-    → adds edge T1 → T2  (T1 had SIREAD on Bob, T2 wrote it)
+    RecordWrite(T2, "Bob"):
+        T1 ∈ siReads["Bob"]  → add edge T1 → T2
 
 T1: COMMIT
-    CheckCommit: T1 has outgoing edge T1→T2 AND incoming edge T2→T1 → cycle
-    T1 aborted with ErrSSIConflict
+    CheckCommit(T1):
+        incoming edges: {T2 → T1} ✓
+        outgoing edges: {T1 → T2} ✓
+        cycle detected → ABORT T1 (ErrSSIConflict)
 
 T2: COMMIT
-    CheckCommit: T2 has only the outgoing edge T2→T1 (T1 is gone)
-    T2 commits successfully
+    CheckCommit(T2):
+        incoming edges: {T1 → T2} — but T1 is aborted, so no live cycle
+        → COMMIT ✓
+
+Final state: Alice = on_call, Bob = off_call (invariant satisfied)
+Client retries T1; T1 now sees Bob = off_call → does not take Alice off call.
 ```
+
+---
 
 ## SSI vs 2PL Serializable
 
-| Property | SSI | 2PL Serializable |
+| Property | SSI (MVCC Serializable) | 2PL Serializable |
 |---|---|---|
-| Readers block writers | No | Yes (S lock held) |
-| Writers block readers | No | Yes (X lock held) |
-| Deadlocks possible | No | Yes |
-| False aborts possible | Yes (rare) | No |
-| Typical throughput | Higher | Lower |
+| Readers block writers | **No** | Yes (S lock held) |
+| Writers block readers | **No** | Yes (X lock held) |
+| Deadlocks | **Not possible** | Possible |
+| False aborts (safe but unnecessary) | Rare | None |
+| Throughput under read-heavy load | Higher | Lower |
+| Implementation complexity | Higher | Lower |
 
-SSI aborts more transactions than strictly necessary in some edge cases (the cycle heuristic is conservative), but eliminates deadlocks entirely for MVCC workloads.
+SSI is the approach used by PostgreSQL (since 9.1), CockroachDB, and YugabyteDB for
+their Serializable isolation tier.
+
+---
 
 ## Reference
 
-Cahill, M. J., Röhm, U., & Fekete, A. D. (2008). *Serializable isolation for snapshot databases*. SIGMOD.
+Cahill, M. J., Röhm, U., & Fekete, A. D. (2008).
+*Serializable isolation for snapshot databases.*
+SIGMOD 2008. [PDF](https://courses.cs.washington.edu/courses/cse444/08au/544M/READING-LIST/fekete-sigmod2008.pdf)

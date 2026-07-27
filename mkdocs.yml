@@ -26,6 +26,7 @@ theme:
     - navigation.top
     - navigation.tracking
     - content.code.copy
+    - content.tabs.link
     - search.suggest
     - search.highlight
   palette:
@@ -52,6 +53,8 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.inlinehilite
   - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
 
 plugins:
   - search
@@ -65,9 +68,15 @@ nav:
       - MVCC: architecture/mvcc.md
       - Serializable Snapshot Isolation: architecture/ssi.md
       - Deadlock Detection: architecture/deadlock.md
+  - Deep Dives:
+      - MVCC vs 2PL: deep-dives/mvcc-vs-2pl.md
+      - Snapshot Visibility Algorithm: deep-dives/visibility-algorithm.md
+      - Isolation Level Reference: deep-dives/isolation-levels.md
   - API Reference: api-reference.md
   - Anomaly Scenarios: scenarios.md
+  - Benchmarks: benchmarks.md
   - Operations: RUNBOOK.md
+  - Contributing: contributing.md
   - Design Decisions:
       - ADR Index: adr/README.md
       - ADR-0001 Two protocols: adr/0001-two-protocols.md

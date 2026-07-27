@@ -1,90 +1,186 @@
 # Two-Phase Locking (2PL)
 
+> **See also:** [ADR-0002 — Strict 2PL & intention locks](../adr/0002-strict-2pl-intention-locks.md) · [Deadlock Detection](deadlock.md) · [MVCC vs 2PL](../deep-dives/mvcc-vs-2pl.md)
+
 ## What it is
 
-Two-phase locking is a concurrency-control protocol that guarantees serializability by enforcing a simple rule: **a transaction may not acquire new locks after it has released any lock**.
+Two-phase locking is a concurrency-control protocol that guarantees serializability
+through one rule: **a transaction may not acquire new locks after it has released any lock**.
 
-This implementation uses **strict 2PL** — all locks are held until commit or abort, which prevents cascading aborts (dirty reads of uncommitted writes that later roll back). See [ADR-0002](../adr/0002-strict-2pl-intention-locks.md) for the design rationale.
+This splits every transaction's life into two strict phases:
 
-## Lock modes
+```
+Phase 1 — Growing    │ Phase 2 — Shrinking
+─────────────────────┼──────────────────────
+Acquire locks freely │ Release locks (no new acquires)
+Read / write rows    │ (In strict 2PL: phase 2 begins only at commit/abort)
+```
 
-Five modes form a compatibility matrix:
+This implementation uses **strict 2PL**: all locks are held until commit or abort.
+Strict 2PL prevents cascading aborts — no other transaction can observe a dirty write
+because the X lock is held until the writer commits or rolls back.
+See [ADR-0002](../adr/0002-strict-2pl-intention-locks.md) for the full rationale.
 
-| Mode | Meaning | Compatible with |
+---
+
+## Lock modes and compatibility
+
+Five modes form the standard **intention lock hierarchy**:
+
+| Mode | Full name | Meaning |
 |---|---|---|
-| **IS** | Intent Shared — intends to acquire S on a child | IS, IX, S |
-| **IX** | Intent Exclusive — intends to acquire X on a child | IS, IX |
-| **S** | Shared read | IS, S |
-| **SIX** | Shared + Intent Exclusive | IS |
-| **X** | Exclusive write | *(nothing)* |
+| **IS** | Intent Shared | Plans to acquire S on a child resource |
+| **IX** | Intent Exclusive | Plans to acquire X on a child resource |
+| **S** | Shared | Read lock on this resource |
+| **SIX** | Shared + Intent Exclusive | Holds S on this resource; plans X on children |
+| **X** | Exclusive | Write lock; incompatible with everything |
 
-Intention modes (IS/IX) are used on **table** resources; S/X on **row** resources. This lets a row write (IX on table + X on row) coexist with reads of other rows (IS on table + S on their rows) without serializing on a single table-level lock.
+**Compatibility matrix** (`✓` = compatible, `✗` = conflict):
 
-## Lock acquisition
+| | IS | IX | S | SIX | X |
+|---|---|---|---|---|---|
+| **IS** | ✓ | ✓ | ✓ | ✓ | ✗ |
+| **IX** | ✓ | ✓ | ✗ | ✗ | ✗ |
+| **S** | ✓ | ✗ | ✓ | ✗ | ✗ |
+| **SIX** | ✓ | ✗ | ✗ | ✗ | ✗ |
+| **X** | ✗ | ✗ | ✗ | ✗ | ✗ |
+
+**How intention locks help:** A row write requires `IX(table) + X(row)`. A row read
+requires `IS(table) + S(row)`. Two readers on the same table hold `IS + IS` on the table
+(compatible) without serializing — only the row-level locks need to be checked against
+each other. Without intention locks, every row write would require an `X` on the entire
+table, killing parallelism.
+
+---
+
+## Lock acquisition algorithm
 
 ```
-LockTable.Acquire(txnID, resource, mode)
-    │
-    ├─ load or create LockQueue for resource (sync.Map)
-    │
-    ├─ check compatibility with currently-granted locks
-    │   ├─ compatible → add to granted set, return immediately
-    │   └─ incompatible → enqueue in waiting list
-    │                    block on channel (with timeout)
-    │
-    └─ on grant: move from waiting to granted
+LockTable.Acquire(txnID, resource, mode):
+
+  queue = getOrCreateQueue(resource)   // sync.Map lookup
+
+  queue.mu.Lock()
+
+  if compatible(mode, all_granted_modes):
+      add entry{txnID, mode} to granted set
+      add resource to txn.heldLocks
+      queue.mu.Unlock()
+      return nil                       // fast path: no contention
+
+  // Conflict — enqueue and block
+  ch = make(chan struct{}, 1)
+  add entry{txnID, mode, ch} to waiting list  // FIFO position preserved
+  wfg.AddEdge(txnID, each_conflicting_holder)
+  queue.mu.Unlock()
+
+  select {
+  case <-ch:            // woken by a releasing transaction
+      check for abort signal (deadlock victim)
+      return nil
+  case <-lockTimeoutCh:
+      dequeue self; return ErrLockTimeout
+  case <-txnCtx.Done():
+      dequeue self; return ErrTxnAborted
+  }
 ```
 
-The queue is **FIFO within a mode class**: a waiting S lock cannot jump ahead of a waiting X lock, preventing writer starvation.
+The queue is **FIFO within a mode class** — a waiting X lock cannot be bypassed by a
+later S lock, preventing writer starvation.
+
+---
 
 ## Lock upgrade
 
-A transaction that holds S and needs X calls `Upgrade(txnID, resource)`:
+A transaction that holds `S` on a resource and then needs `X` calls `Upgrade`:
 
 ```
-Upgrade = Release(S) → Acquire(X)
+Upgrade(txnID, resource):
+    Release(S on resource)
+    Acquire(X on resource)   // may block if another S-holder is present
 ```
 
-If another S-holder is present, the upgrade waits until all other S-holders release. This is a potential deadlock point (two transactions each trying to upgrade simultaneously), which the deadlock detector resolves.
+Upgrade is a deadlock-risk point: if T1 and T2 both hold S and both try to upgrade,
+each waits for the other's S to release — a cycle. The deadlock detector resolves this
+by aborting the younger transaction.
+
+---
 
 ## Held-set tracking
 
-Each transaction maintains a `heldLocks []ResourceID` set. At commit/abort, `LockTable.ReleaseAll(txnID)` iterates this set and wakes blocked waiters on each queue. Without the held set, we'd have to scan every queue in the lock table — O(total queues) instead of O(locks held by this txn).
+Each `Transaction` keeps a `heldLocks []ResourceID` list.
 
-## Deadlock
+At commit/abort, `LockTable.ReleaseAll(txnID)`:
 
-With 2PL, **deadlocks are possible** whenever two transactions wait for each other's locks in a cycle. A 50 ms background goroutine ([Deadlock Detection](deadlock.md)) runs DFS over the wait-for graph and aborts the youngest transaction in the cycle.
+1. Iterates `heldLocks` — O(locks held), not O(total queues).
+2. For each queue: removes txn from the granted set, wakes the first compatible waiter.
+3. Updates the wait-for graph (`RemoveNode(txnID)`).
 
-## What 2PL prevents
+Without this set, releasing all locks would require a full scan of every queue in the
+lock table — prohibitively expensive at scale.
 
-| Anomaly | Prevented? |
-|---|---|
-| Dirty read | ✅ (strict 2PL: X held until commit) |
-| Non-repeatable read | ✅ (S held until commit) |
-| Phantom read | ✅ with gap locks (see [ADR-0006](../adr/0006-gap-locking.md)) |
-| Lost update | ✅ (X before write, upgrade from S) |
-| Write skew | ✅ at Serializable (SIX on predicate scans) |
-| Deadlock | ❌ possible — detected and resolved |
+---
 
-## Example: lost update under 2PL
+## Gap locking for phantom prevention
+
+At `Serializable` isolation, a scan must prevent _phantoms_ — rows inserted by a
+concurrent transaction in the scan's key range that would appear on a re-scan.
+
+2PL prevents this with **gap locks**: range locks on the key space between existing rows.
+
+```
+Scan accounts WHERE balance > 1000:
+
+  T1 holds:
+    IS(table:accounts)               // intention lock on the table
+    S(row:accounts:3)                // locks existing match
+    S(row:accounts:7)                // locks existing match
+    S(gap:accounts:[3..7])           // gap lock: no inserts in this range
+    S(gap:accounts:[7..∞])           // gap lock: no inserts above 7
+```
+
+A concurrent insert into the gap blocks on the gap lock. See [ADR-0006](../adr/0006-gap-locking.md).
+
+---
+
+## What 2PL prevents at each isolation level
+
+| Isolation level | Dirty read | Non-rep read | Phantom | Lost update | Write skew |
+|---|---|---|---|---|---|
+| Read Uncommitted | ✗ possible | ✗ | ✗ | ✗ | ✗ |
+| Read Committed | ✅ | ✗ | ✗ | ✗ | ✗ |
+| Repeatable Read | ✅ | ✅ | ✗ (without gap locks) | ✅ | ✗ |
+| Serializable | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+---
+
+## Annotated example — lost update under 2PL
 
 ```
 T1: BEGIN 2PL REPEATABLE_READ
 T2: BEGIN 2PL REPEATABLE_READ
 
-T1: READ accounts key="1"  → acquires S(row:accounts:1), reads balance=100
-T2: READ accounts key="1"  → acquires S(row:accounts:1), reads balance=100
+T1: READ accounts "1"
+    → IS(table:accounts) granted
+    → S(row:accounts:1) granted   balance = 100
 
-T1: WRITE accounts key="1" val=150 → tries X(row:accounts:1)
-    T2 holds S → T1 blocks, enters wait-for graph
+T2: READ accounts "1"
+    → IS(table:accounts) granted  (compatible with T1's IS)
+    → S(row:accounts:1) granted   (compatible with T1's S)
+                                  balance = 100
 
-T2: WRITE accounts key="1" val=200 → tries X(row:accounts:1)
-    T1 holds S → T2 blocks
+T1: WRITE accounts "1" val=110
+    → IX(table:accounts) upgrade: IS→IX granted (compatible with T2's IS)
+    → X(row:accounts:1): BLOCKED  T2 holds S → wait-for edge T1→T2
 
-    Deadlock detector fires:
-    cycle = [T1 → T2 → T1]
-    victim = T2 (youngest)
-    T2 aborted with ErrDeadlock
+T2: WRITE accounts "1" val=150
+    → IX(table:accounts): blocked? No — T1 holds IX (compatible)
+    → X(row:accounts:1): BLOCKED  T1 holds S → wait-for edge T2→T1
 
-T1: unblocked → acquires X → writes 150 → commits
+    Deadlock detector fires (cycle: T1→T2→T1)
+    Victim = T2 (highest ID = youngest)
+    T2 aborted → releases S(row:accounts:1)
+
+T1: unblocked → acquires X(row:accounts:1) → writes 110 → COMMIT
+    Final balance: 110  (T2's +50 lost — client must retry T2)
 ```
