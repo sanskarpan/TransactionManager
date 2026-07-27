@@ -58,11 +58,12 @@ type Manager struct {
 
 // WFGAdapter wraps the deadlock.WFG so the txn package can call into the
 // wait-for graph without importing the deadlock package (which would be a
-// cycle: deadlock → txn → deadlock). The adapter is just two function
+// cycle: deadlock → txn → deadlock). The adapter is just function
 // pointers; the real graph is wired by cmd/server at startup.
 type WFGAdapter struct {
-	AddEdgeFn    func(from, to uint64)
-	RemoveNodeFn func(txnID uint64)
+	AddEdgeFn     func(from, to uint64)
+	RemoveEdgesFn func(txnID uint64)
+	RemoveNodeFn  func(txnID uint64)
 }
 
 // AddEdge records that `from` is waiting for `to` to release a lock. No-op
@@ -78,8 +79,8 @@ func (w *WFGAdapter) AddEdge(from, to uint64) {
 // txn waits no more (granted or aborted) so the deadlock detector does not
 // see stale predecessors. No-op when no WFG is wired.
 func (w *WFGAdapter) RemoveEdges(txnID uint64) {
-	if w.RemoveNodeFn != nil {
-		w.RemoveNodeFn(txnID)
+	if w.RemoveEdgesFn != nil {
+		w.RemoveEdgesFn(txnID)
 	}
 }
 

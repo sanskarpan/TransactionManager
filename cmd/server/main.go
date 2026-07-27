@@ -102,6 +102,7 @@ func main() {
 
 	// Wire WFG adapter into manager
 	mgr.WFG.AddEdgeFn = wfg.AddEdge
+	mgr.WFG.RemoveEdgesFn = wfg.RemoveEdges
 	mgr.WFG.RemoveNodeFn = wfg.RemoveNode
 
 	dd.Start()
