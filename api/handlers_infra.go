@@ -182,7 +182,7 @@ func (s *Server) handleDeadlocks(w http.ResponseWriter, _ *http.Request) {
 		copy(cycle, rec.Cycle)
 		result = append(result, deadlockEntry{
 			ID:           rec.ID,
-			DetectedAt:   rec.DetectedAt.String(),
+			DetectedAt:   rec.DetectedAt.Format(time.RFC3339),
 			Cycle:        cycle,
 			Victim:       rec.Victim,
 			VictimReason: rec.VictimReason,
@@ -258,7 +258,7 @@ func (s *Server) handleMVCCStats(w http.ResponseWriter, _ *http.Request) {
 		"totalVersions": stats.TotalVersions,
 		"pruned":        stats.Pruned,
 		"vacuumRuns":    stats.Runs,
-		"lastRunAt":     stats.LastRunAt.String(),
+		"lastRunAt":     stats.LastRunAt.Format(time.RFC3339),
 	})
 }
 
