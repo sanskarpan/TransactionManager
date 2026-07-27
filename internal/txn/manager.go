@@ -739,7 +739,6 @@ func (m *Manager) TwoPLRead(txn *Transaction, table, key string) ([]types.Value,
 	return v, ok, nil
 }
 
-
 // applyMVCCUndo undoes MVCC version chain changes for an aborted transaction.
 // For every written key, apply BOTH RemoveByXMin AND ClearXMax:
 //   - RemoveByXMin removes any version this txn created (XMin == txnID).
