@@ -24,14 +24,14 @@ const edgeTestAdminToken = "edge-test-admin-token-32chars!"
 // newAPIServer mirrors the api_test.newTestServer helper but lives in
 // package api so fuzz targets and edge-case tests can use unexported
 // helpers without crossing the test-package boundary.
-func newAPIServer(t *testing.T) *Server {
+func newAPIServer(t testing.TB) *Server {
 	t.Helper()
 	return newAPIServerWithConfig(t, ServerConfig{})
 }
 
 // newAPIServerWithConfig is like newAPIServer but lets callers inject a
 // ServerConfig (e.g. AdminToken for admin-gated endpoint tests).
-func newAPIServerWithConfig(t *testing.T, cfg ServerConfig) *Server {
+func newAPIServerWithConfig(t testing.TB, cfg ServerConfig) *Server {
 	t.Helper()
 	catalog := storage.NewCatalog()
 	storage.SeedCatalog(catalog)
@@ -186,6 +186,13 @@ func FuzzParseTxnID(f *testing.F) {
 // FuzzIsolationFromString covers the isolation-level parser for
 // arbitrary strings. The handler must not panic and must return a 200
 // (known) or 400 (unknown) status.
+//
+// The server is created once outside f.Fuzz so that the background
+// goroutines (deadlock detector, vacuum) are not recreated on every
+// iteration. Recreating them per-iteration causes goroutine
+// accumulation: Stop() only signals exit but does not wait, so tens
+// of thousands of goroutines pile up over a long fuzz run and starve
+// the scheduler.
 func FuzzIsolationFromString(f *testing.F) {
 	f.Add("read_committed")
 	f.Add("rc")
@@ -193,12 +200,12 @@ func FuzzIsolationFromString(f *testing.F) {
 	f.Add("BOGUS")
 	f.Add("read_uncommitted")
 	f.Add("serializable")
+	srv := newAPIServer(f)
 	f.Fuzz(func(t *testing.T, iso string) {
 		// Avoid quote-injection breaking the JSON envelope: replace
 		// any double-quote with a single quote before splicing into
 		// the body string.
 		escaped := strings.ReplaceAll(iso, `"`, `'`)
-		srv := newAPIServer(t)
 		body := `{"protocol":"mvcc","isolation":"` + escaped + `"}`
 		req := httptest.NewRequest(http.MethodPost, "/api/txn/begin", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
