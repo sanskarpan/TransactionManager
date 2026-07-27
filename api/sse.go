@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -87,17 +86,12 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.sseBus.Unsubscribe(ch)
 
-	// Tie the per-connection select to the server's sseCtx so
-	// Shutdown drains this handler without waiting for the
-	// per-request r.Context() to fire (which only happens after
-	// httpServer.Shutdown's deadline).
-	ctx, cancel := mergeContexts(r.Context(), s.sseCtx)
-	defer cancel()
-
 	reqID := reqIDFromCtx(r)
 	for {
 		select {
-		case <-ctx.Done():
+		case <-r.Context().Done():
+			return
+		case <-s.sseCtx.Done():
 			return
 		case evt, ok := <-ch:
 			if !ok {
@@ -116,23 +110,4 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
-}
-
-// mergeContexts returns a context that is cancelled when EITHER ctx or
-// fallback is cancelled. Used to make SSE handlers exit on either the
-// per-request context (client disconnect) or the server-wide shutdown
-// context (CT-04).
-func mergeContexts(ctx, fallback context.Context) (context.Context, context.CancelFunc) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	out, cancel := context.WithCancel(context.Background())
-	go func() {
-		defer cancel()
-		select {
-		case <-ctx.Done():
-		case <-fallback.Done():
-		}
-	}()
-	return out, cancel
 }
