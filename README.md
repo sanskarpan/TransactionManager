@@ -17,11 +17,61 @@
   &nbsp;
   <img alt="race-safe" src="https://img.shields.io/badge/race--safe-%E2%9C%94-2ea44f">
   &nbsp;
+  <img alt="coverage" src="https://img.shields.io/badge/coverage-81%25-brightgreen">
+  &nbsp;
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
+---
+
+## Demo
+
+### Concurrent MVCC transactions — snapshot isolation in action
+
+<p align="center">
+  <img src="docs/screenshots/demo-api.gif" alt="MVCC demo: two concurrent serializable transactions, snapshot isolation" width="860">
+</p>
+
+### Deadlock detection — 2PL cycle caught and victim aborted
+
+<p align="center">
+  <img src="docs/screenshots/demo-deadlock.gif" alt="Deadlock demo: two 2PL transactions form a cycle, detector aborts the youngest" width="860">
+</p>
+
+### Quick start — read → write → commit in under 1 second
+
+<p align="center">
+  <img src="docs/screenshots/demo-quickstart.gif" alt="Quick start: healthz, begin, read, write, commit, metrics" width="860">
+</p>
+
+---
+
+## Interactive UI
+
+Run the frontend and explore every concurrency anomaly in your browser — step by step, with live lock state and version chains.
+
 <p align="center">
   <img src="docs/screenshots/playground.png" alt="Transaction Playground — three concurrent transactions with protocol and isolation controls" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="Dashboard — live metrics: active txns, throughput, abort rate, deadlock count" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/wfg.png" alt="Wait-For Graph — live graph of which transactions are waiting on which locks" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/scenarios.png" alt="Scenarios — seven anomaly scenarios: write skew, deadlock, dirty read, lost update, phantom read, and more" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/versions.png" alt="MVCC Version Chains — inspect the version history of any row" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/benchmarks.png" alt="Benchmarks — TPC-B workload results with balance invariant verification" width="860">
 </p>
 
 ---
@@ -55,17 +105,9 @@ docker run --rm -p 8080:8080 txn-manager:latest
 
 Pick a protocol (2PL or MVCC), pick an isolation level, open up to three concurrent transactions, and execute reads, writes, scans, inserts, and deletes. Lock state updates live. Savepoints and rollback work. Every operation is logged.
 
-<p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="Dashboard — live metrics: active txns, throughput, abort rate, deadlock count" width="860">
-</p>
-
 ### Anomaly scenarios — see exactly how isolation levels fail
 
 Seven canned scenarios reproduce every classic concurrency anomaly. Each runs the transactions step by step and shows what went wrong (or what the engine prevented).
-
-<p align="center">
-  <img src="docs/screenshots/scenarios.png" alt="Scenarios — seven anomaly scenarios: write skew, deadlock, dirty read, lost update, phantom read, and more" width="860">
-</p>
 
 | Anomaly | Occurs at | Prevented at |
 |---|---|---|
@@ -81,17 +123,9 @@ Seven canned scenarios reproduce every classic concurrency anomaly. Each runs th
 
 The deadlock detector runs DFS on the wait-for graph every 50ms. When it finds a cycle it aborts the youngest transaction and records the event. The WFG page renders the graph in real time over SSE.
 
-<p align="center">
-  <img src="docs/screenshots/wfg.png" alt="Wait-For Graph — live graph of which transactions are waiting on which locks" width="860">
-</p>
-
 ### MVCC version chains
 
 Inspect the full version history for any row: every write, the transaction that made it, and whether it is visible to a given snapshot.
-
-<p align="center">
-  <img src="docs/screenshots/versions.png" alt="MVCC Version Chains — inspect the version history of any row" width="860">
-</p>
 
 ---
 
@@ -185,9 +219,9 @@ Log records are flushed with a 2ms group-commit window: multiple concurrent writ
 
 A fixed LRU frame pool backs the heap files. Before any dirty page is written to disk, the WAL flush is forced to the page's LSN — the WAL-before-page rule guarantees recoverability.
 
-### Raft — leader election + log replication
+### Raft — leader election + log replication + snapshots
 
-A standard Raft implementation over raw TCP (`encoding/gob` framing). Randomized election timeout (150–300ms), 50ms heartbeat. HTTP write handlers propose to Raft first; the FSM applies committed entries to the transaction manager deterministically on all nodes.
+A standard Raft implementation over raw TCP (`encoding/gob` framing). Randomized election timeout (150–300ms), 50ms heartbeat. HTTP write handlers propose to Raft first; the FSM applies committed entries to the transaction manager deterministically on all nodes. Lagging followers are caught up via InstallSnapshot (triggered every 1000 applied entries).
 
 ---
 
