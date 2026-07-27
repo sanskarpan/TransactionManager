@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -333,10 +334,10 @@ func (m *Manager) Abort(txnID ID, reason error) error {
 	return nil
 }
 
-// applyUndoLog restores before-images in the catalog
-func (m *Manager) applyUndoLog(txn *Transaction) {
-	entries := txn.UndoLog.All()
-	// Apply in reverse
+// applyUndoEntries restores before-images for the supplied undo entries,
+// applied in reverse order. Used by applyUndoLog (full abort) and
+// RollbackToSavepoint (partial rollback) to avoid duplicating the switch.
+func (m *Manager) applyUndoEntries(entries []UndoEntry) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		table, ok := m.Catalog.Lookup(e.Table)
@@ -352,6 +353,11 @@ func (m *Manager) applyUndoLog(txn *Transaction) {
 			}
 		}
 	}
+}
+
+// applyUndoLog restores all before-images in the catalog for a 2PL abort.
+func (m *Manager) applyUndoLog(txn *Transaction) {
+	m.applyUndoEntries(txn.UndoLog.All())
 }
 
 // CreateSavepoint saves a named savepoint
@@ -399,26 +405,13 @@ func (m *Manager) RollbackToSavepoint(txnID ID, name string) error {
 		return &types.TxnError{Code: types.ErrSavepointNotFound, Message: fmt.Sprintf("savepoint %q not found", name)}
 	}
 
-	// Apply undo entries from current pos back to savepoint
+	// Apply undo entries from current pos back to savepoint. MVCC protocol
+	// stores no before-images in the catalog (writes go to version chains),
+	// so only 2PL needs the catalog restoration.
 	entries := txn.UndoLog.EntriesFrom(sp.UndoPosition)
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		if txn.Protocol == Protocol2PL {
-			table, ok := m.Catalog.Lookup(e.Table)
-			if !ok {
-				continue
-			}
-			switch e.Op {
-			case UndoInsert:
-				table.DeleteRow(e.Key)
-			case UndoUpdate, UndoDelete:
-				if e.BeforeImage != nil {
-					table.PutRow(e.Key, e.BeforeImage)
-				}
-			}
-		}
+	if txn.Protocol == Protocol2PL {
+		m.applyUndoEntries(entries)
 	}
-
 	txn.UndoLog.TruncateTo(sp.UndoPosition)
 	return nil
 }
@@ -555,20 +548,16 @@ func (m *Manager) PruneHistory() int {
 	// the committedBeforeSnapshot check in IsVisible would treat that txn's
 	// rolled-back writes as visible (dirty read). The normal horizon-based
 	// pruning above keeps the aborted map bounded in practice.
-	for excess := len(m.committed) - MaxHistoryRetained; excess > 0; excess-- {
-		var oldestID ID
-		var first = true
+	if excess := len(m.committed) - MaxHistoryRetained; excess > 0 {
+		sorted := make([]ID, 0, len(m.committed))
 		for id := range m.committed {
-			if first || id < oldestID {
-				oldestID = id
-				first = false
-			}
+			sorted = append(sorted, id)
 		}
-		if first {
-			break
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+		for i := 0; i < excess; i++ {
+			delete(m.committed, sorted[i])
+			removed++
 		}
-		delete(m.committed, oldestID)
-		removed++
 	}
 	return removed
 }
@@ -581,16 +570,25 @@ func (m *Manager) MarkCommitted(id ID) {
 	m.mu.Unlock()
 }
 
-// VacuumChecker wraps Manager to satisfy the mvcc.Vacuum interface.
-// It exists because mvcc.TxnID is a type alias for uint64 while
-// ID is a distinct named type; this adapter bridges the two
+// VacuumChecker wraps Manager to satisfy both the mvcc.Vacuum interface and
+// mvcc.TxnStatusChecker. It exists because mvcc.TxnID is a type alias for
+// uint64 while ID is a distinct named type; this adapter bridges the two
 // without exporting the manager's internal methods to the mvcc package.
 type VacuumChecker struct{ M *Manager }
 
 // IsCommitted reports whether id is in the manager's committed history map.
-// Part of the mvcc.Vacuum interface; called during the prune pass to decide
-// whether an XMax-tagged version is safe to drop.
 func (c VacuumChecker) IsCommitted(id mvcc.TxnID) bool { return c.M.IsCommitted(ID(id)) }
+
+// IsAborted reports whether id is in the manager's aborted history map.
+func (c VacuumChecker) IsAborted(id mvcc.TxnID) bool { return c.M.IsAborted(ID(id)) }
+
+// IsActive reports whether id is a currently-active (uncommitted) transaction.
+func (c VacuumChecker) IsActive(id mvcc.TxnID) bool { return c.M.IsActive(ID(id)) }
+
+// TxnStatus returns active and committed flags in a single read-locked call.
+func (c VacuumChecker) TxnStatus(id mvcc.TxnID) (active, committed bool) {
+	return c.M.TxnStatus(ID(id))
+}
 
 // OldestActiveTxnID returns the smallest active transaction ID, or 0 if
 // no transactions are active. Part of the mvcc.Vacuum interface; the
@@ -741,16 +739,6 @@ func (m *Manager) TwoPLRead(txn *Transaction, table, key string) ([]types.Value,
 	return v, ok, nil
 }
 
-// mvccStatusChecker wraps Manager to satisfy mvcc.TxnStatusChecker.
-// mvcc.TxnID is a type alias for uint64, while ID is a distinct named type.
-type mvccStatusChecker struct{ m *Manager }
-
-func (c mvccStatusChecker) IsCommitted(id mvcc.TxnID) bool { return c.m.IsCommitted(ID(id)) }
-func (c mvccStatusChecker) IsAborted(id mvcc.TxnID) bool   { return c.m.IsAborted(ID(id)) }
-func (c mvccStatusChecker) IsActive(id mvcc.TxnID) bool    { return c.m.IsActive(ID(id)) }
-func (c mvccStatusChecker) TxnStatus(id mvcc.TxnID) (active, committed bool) {
-	return c.m.TxnStatus(ID(id))
-}
 
 // applyMVCCUndo undoes MVCC version chain changes for an aborted transaction.
 // For every written key, apply BOTH RemoveByXMin AND ClearXMax:
@@ -861,7 +849,7 @@ func (m *Manager) MVCCRead(txn *Transaction, table, key string) ([]types.Value, 
 		return nil, false, types.NewTxnAbortedError()
 	}
 
-	checker := mvccStatusChecker{m}
+	checker := VacuumChecker{M: m}
 	v := chain.FindVisible(func(ver *mvcc.Version) bool {
 		return mvcc.IsVisible(ver, uint64(txn.ID), snap, checker)
 	})
@@ -935,7 +923,7 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 	// concurrent *committed* transaction (active at our snapshot) was missed
 	// — a lost update. Delegate to mvcc.CheckWriteConflictNoLock, which walks
 	// the whole chain under our held write lock.
-	if err := mvcc.CheckWriteConflictNoLock(mvcc.TxnID(txn.ID), chain, snap, mvccStatusChecker{m}); err != nil {
+	if err := mvcc.CheckWriteConflictNoLock(mvcc.TxnID(txn.ID), chain, snap, VacuumChecker{M: m}); err != nil {
 		var wcerr *mvcc.WriteConflictError
 		if errors.As(err, &wcerr) {
 			return types.NewWriteConflictError(uint64(wcerr.ConflictingTxn))
@@ -956,7 +944,7 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 
 	case UndoUpdate:
 		// Find the currently visible version to supersede
-		checker := mvccStatusChecker{m}
+		checker := VacuumChecker{M: m}
 		var visible *mvcc.Version
 		for v := chain.UnsafeHead(); v != nil; v = v.Prev {
 			if mvcc.IsVisible(v, uint64(txn.ID), snap, checker) {
@@ -985,7 +973,7 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 		chain.PrependUnsafe(newVer)
 
 	case UndoDelete:
-		checker2 := mvccStatusChecker{m}
+		checker2 := VacuumChecker{M: m}
 		var visible *mvcc.Version
 		for v := chain.UnsafeHead(); v != nil; v = v.Prev {
 			if mvcc.IsVisible(v, uint64(txn.ID), snap, checker2) {
@@ -1030,7 +1018,9 @@ func (m *Manager) MVCCScan(txn *Transaction, table string, filter func(storage.R
 
 	var result []storage.Row
 
-	checker := mvccStatusChecker{m}
+	checker := VacuumChecker{M: m}
+	ssiEnabled := txn.Isolation == Serializable && m.SSITracker != nil
+	ssiPrefix := table + ":" // precomputed once; avoids a per-row alloc in the SSI hot path
 	m.MVCCStore.ForEachChainInTable(table, func(key string, chain *mvcc.VersionChain) {
 		v := chain.FindVisible(func(ver *mvcc.Version) bool {
 			return mvcc.IsVisible(ver, uint64(txn.ID), snap, checker)
@@ -1043,8 +1033,8 @@ func (m *Manager) MVCCScan(txn *Transaction, table string, filter func(storage.R
 			result = append(result, row)
 		}
 		// Record read for SSI
-		if txn.Isolation == Serializable && m.SSITracker != nil {
-			fullKey := table + ":" + key
+		if ssiEnabled {
+			fullKey := ssiPrefix + key
 			m.SSITracker.RecordRead(txn, fullKey)
 			txn.addSIRead(storage.RowKey(fullKey))
 		}

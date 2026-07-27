@@ -182,12 +182,13 @@ func TestCT19_ReapEmptyConcurrentWrite_NoSilentLoss(t *testing.T) {
 	}
 
 	// Now simulate a writer that pre-loaded the chain before the Delete.
-	// We do this by injecting a chain with tombstoned=true directly into
-	// the sync.Map to simulate "writer loaded the chain, ReapEmpty
-	// set tombstone and Delete'd it".
-	injected := NewVersionChain("k")
+	// We do this by injecting a tombstoned chain via MarkChainTombstoned and
+	// then directly re-inserting it into the table's inner map, to simulate
+	// "writer loaded the chain, ReapEmpty set tombstone and Delete'd it".
+	injected := NewVersionChain("k2")
 	injected.tombstoned = true
-	store.chains.Store(chainKey("t", "k2"), injected)
+	ts := store.getTable("t")
+	ts.chains.Store("k2", injected)
 	// MVCCWrite must observe tombstoned=true under the chain's write
 	// lock and fall back to a fresh chain.
 	got := store.GetOrCreateChain("t", "k2")

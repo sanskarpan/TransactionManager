@@ -1,40 +1,53 @@
 package mvcc
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/sanskarpan/TransactionManager/internal/storage"
 )
 
-// Store is the global version-chain map keyed by "table:key". It is
-// safe for concurrent reads (sync.Map loads) and for concurrent writes
-// (sync.Map stores). Chains are created lazily on first write and
-// reaped by the vacuum when their version list becomes empty.
-type Store struct {
-	chains sync.Map // string key -> *VersionChain
+// tableStore holds the version chains for a single table.
+type tableStore struct {
+	chains sync.Map // rowKey string -> *VersionChain
 }
 
-// NewStore constructs an empty store. The first call to GetOrCreateChain
-// lazily allocates the version chain for a (table, key) pair.
+// Store is the global version-chain map keyed by table and then row key.
+// It is safe for concurrent reads and writes. Chains are created lazily on
+// first write and reaped by the vacuum when their version list becomes empty.
+//
+// The two-level structure (tables → chains) makes ForEachChainInTable O(rows
+// in table) instead of O(total rows across all tables).
+type Store struct {
+	tables sync.Map // table string -> *tableStore
+}
+
+// NewStore constructs an empty store.
 func NewStore() *Store {
 	return &Store{}
 }
 
-func chainKey(table, key string) string {
-	return fmt.Sprintf("%s:%s", table, key)
+// getTable returns the tableStore for table, creating one if necessary.
+func (s *Store) getTable(table string) *tableStore {
+	if v, ok := s.tables.Load(table); ok {
+		return v.(*tableStore)
+	}
+	ts := &tableStore{}
+	actual, _ := s.tables.LoadOrStore(table, ts)
+	return actual.(*tableStore)
 }
 
 // GetChain returns the version chain for (table, key) if it exists.
-// Returns (nil, false) if the chain has not been created or has been
-// reaped by the vacuum. Callers that need to mutate the chain must
-// use GetOrCreateChain instead.
+// Returns (nil, false) if the chain has not been created or has been reaped.
 func (s *Store) GetChain(table, key string) (*VersionChain, bool) {
-	v, ok := s.chains.Load(chainKey(table, key))
+	tv, ok := s.tables.Load(table)
 	if !ok {
 		return nil, false
 	}
-	return v.(*VersionChain), true
+	cv, ok := tv.(*tableStore).chains.Load(key)
+	if !ok {
+		return nil, false
+	}
+	return cv.(*VersionChain), true
 }
 
 // GetOrCreateChain returns the chain for (table, key), creating one if
@@ -48,8 +61,8 @@ func (s *Store) GetChain(table, key string) (*VersionChain, bool) {
 // retries via EvictChain + GetOrCreateChain if the chain was tombstoned
 // between our Load and our Lock.
 func (s *Store) GetOrCreateChain(table, key string) *VersionChain {
-	k := chainKey(table, key)
-	if v, ok := s.chains.Load(k); ok {
+	ts := s.getTable(table)
+	if v, ok := ts.chains.Load(key); ok {
 		chain := v.(*VersionChain)
 		chain.mu.Lock()
 		notTombstoned := !chain.tombstoned
@@ -57,87 +70,91 @@ func (s *Store) GetOrCreateChain(table, key string) *VersionChain {
 		if notTombstoned {
 			return chain
 		}
-		// Tombstoned: evict and fall through to LoadOrStore. Delete
-		// is safe to race with ReapEmpty's own Delete (both are
-		// idempotent). LoadOrStore then creates a fresh chain
-		// (no race winner) or returns a chain another racing
-		// goroutine inserted (also fresh, because they all run
-		// this same function).
-		s.chains.Delete(k)
+		// Tombstoned: evict and fall through to LoadOrStore.
+		ts.chains.Delete(key)
 	}
 	chain := NewVersionChain(storage.RowKey(key))
-	actual, _ := s.chains.LoadOrStore(k, chain)
+	actual, _ := ts.chains.LoadOrStore(key, chain)
 	return actual.(*VersionChain)
 }
 
-// EvictChain removes the chain entry for (table, key) from the sync.Map
-// if it exists. CT-26: MVCCWrite calls this when it observes a
-// tombstoned chain under its write lock — at that point ReapEmpty has
-// set the tombstone + Delete may be racing, but chains.Delete is
-// idempotent so the chain entry is reliably gone after this returns.
-// MVCCWrite then re-GetOrCreateChain's a fresh chain.
+// EvictChain removes the chain entry for (table, key) from the store.
+// CT-26: MVCCWrite calls this when it observes a tombstoned chain under
+// its write lock.
 func (s *Store) EvictChain(table, key string) {
-	s.chains.Delete(chainKey(table, key))
+	if tv, ok := s.tables.Load(table); ok {
+		tv.(*tableStore).chains.Delete(key)
+	}
 }
 
 // MarkChainTombstoned is a TEST-ONLY helper. It marks the chain for
 // (table, key) as tombstoned and evicts it from the store, exactly as
-// ReapEmpty does after setting tombstone=true. CT-26 regression guard
-// uses this to simulate a concurrent ReapEmpty that observes a
-// tombstone between MVCCWrite's GetOrCreateChain and its chain.Lock.
+// ReapEmpty does. CT-26 regression guard uses this to simulate a concurrent
+// ReapEmpty that observes a tombstone between MVCCWrite's GetOrCreateChain
+// and its chain.Lock.
 func (s *Store) MarkChainTombstoned(table, key string) bool {
-	v, ok := s.chains.Load(chainKey(table, key))
+	tv, ok := s.tables.Load(table)
 	if !ok {
 		return false
 	}
-	chain := v.(*VersionChain)
+	cv, ok := tv.(*tableStore).chains.Load(key)
+	if !ok {
+		return false
+	}
+	chain := cv.(*VersionChain)
 	chain.mu.Lock()
 	chain.tombstoned = true
 	chain.mu.Unlock()
-	s.chains.Delete(chainKey(table, key))
+	tv.(*tableStore).chains.Delete(key)
 	return true
 }
 
 // ForEachChain iterates every version chain in the store, regardless of
-// table. Used by the vacuum; expensive on large stores. The callback
-// must not call back into the store's mutating methods.
+// table. Used by the vacuum; the callback must not call back into the
+// store's mutating methods.
 func (s *Store) ForEachChain(fn func(*VersionChain)) {
-	s.chains.Range(func(_, v interface{}) bool {
-		fn(v.(*VersionChain))
+	s.tables.Range(func(_, tv interface{}) bool {
+		tv.(*tableStore).chains.Range(func(_, cv interface{}) bool {
+			fn(cv.(*VersionChain))
+			return true
+		})
 		return true
 	})
 }
 
-// ForEachChainInTable iterates all chains whose key has the given table prefix.
+// ForEachChainInTable iterates all chains for the given table. O(rows in
+// table) — unlike the old flat-map design which was O(total rows across
+// all tables).
 func (s *Store) ForEachChainInTable(table string, fn func(rowKey string, chain *VersionChain)) {
-	prefix := table + ":"
-	s.chains.Range(func(k, v interface{}) bool {
-		key := k.(string)
-		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
-			rowKey := key[len(prefix):]
-			fn(rowKey, v.(*VersionChain))
-		}
+	tv, ok := s.tables.Load(table)
+	if !ok {
+		return
+	}
+	tv.(*tableStore).chains.Range(func(k, cv interface{}) bool {
+		fn(k.(string), cv.(*VersionChain))
 		return true
 	})
 }
 
 // AllVersions returns a snapshot of every chain in the store, keyed by
-// the "table:key" string. Used by the /api/mvcc/versions endpoint and
-// by tests; expensive — never call from a hot path.
+// "table:key". Used by the /api/mvcc/versions endpoint and by tests;
+// expensive — never call from a hot path.
 func (s *Store) AllVersions() map[string][]*Version {
 	result := make(map[string][]*Version)
-	s.chains.Range(func(k, v interface{}) bool {
-		chain := v.(*VersionChain)
-		result[k.(string)] = chain.All()
+	s.tables.Range(func(tk, tv interface{}) bool {
+		table := tk.(string)
+		tv.(*tableStore).chains.Range(func(rk, cv interface{}) bool {
+			result[table+":"+rk.(string)] = cv.(*VersionChain).All()
+			return true
+		})
 		return true
 	})
 	return result
 }
 
-// SeedMVCCStore directly populates MVCC store with initial data. Used by
-// cmd/server at process start (after reading the catalog) and by the
-// benchmark fixture to skip a cold start. Each row becomes a single
-// version with XMin=seedTxnID and XMax=0.
+// SeedMVCCStore directly populates the MVCC store with initial data. Used by
+// cmd/server at process start and by the benchmark fixture to skip a cold
+// start. Each row becomes a single version with XMin=seedTxnID and XMax=0.
 func SeedMVCCStore(store *Store, table string, rows []storage.Row, seedTxnID TxnID) {
 	for _, row := range rows {
 		chain := store.GetOrCreateChain(table, string(row.Key))
@@ -152,43 +169,32 @@ func SeedMVCCStore(store *Store, table string, rows []storage.Row, seedTxnID Txn
 
 // Clear removes all version chains from the store.
 func (s *Store) Clear() {
-	s.chains.Range(func(k, _ interface{}) bool {
-		s.chains.Delete(k)
+	s.tables.Range(func(k, _ interface{}) bool {
+		s.tables.Delete(k)
 		return true
 	})
 }
 
 // ReapEmpty deletes chain entries whose version list is empty. The vacuum
-// loop calls this after a prune pass so the store's sync.Map does not grow
-// without bound over workloads touching a high cardinality of distinct
-// keys (H-03).
+// loop calls this after a prune pass so the store does not grow without
+// bound over workloads touching a high cardinality of distinct keys (H-03).
 //
-// CT-19: previously this used Head() (RLock) and then chains.Delete()
-// outside the lock, racing a concurrent MVCCWrite that could prepend a
-// version between the check and the delete — the write would succeed but
-// the chain would be removed from the map, and subsequent GetChain
-// would return (nil, false), silently losing the write. The fix: hold
-// the chain's write lock across the check, the tombstone, AND the
-// chains.Delete so MVCCWrite cannot interleave.
+// CT-19: holds the chain's write lock across the tombstone AND the Delete
+// so MVCCWrite cannot interleave.
 func (s *Store) ReapEmpty() {
-	s.chains.Range(func(k, v interface{}) bool {
-		chain := v.(*VersionChain)
-		chain.mu.Lock()
-		empty := chain.head == nil
-		if empty {
-			chain.tombstoned = true
-		}
-		// Hold the lock across chains.Delete to serialize with
-		// MVCCWrite's chain.Lock(). MVCCWrite checks
-		// IsTombstonedLocked under the chain's write lock, so it
-		// cannot observe a tombstoned chain unless ReapEmpty has
-		// already unlocked — in which case the Delete has happened
-		// first, the Load in GetOrCreateChain returns no entry, and
-		// LoadOrStore creates a fresh chain.
-		if empty {
-			s.chains.Delete(k)
-		}
-		chain.mu.Unlock()
+	s.tables.Range(func(_, tv interface{}) bool {
+		ts := tv.(*tableStore)
+		ts.chains.Range(func(k, cv interface{}) bool {
+			chain := cv.(*VersionChain)
+			chain.mu.Lock()
+			empty := chain.head == nil
+			if empty {
+				chain.tombstoned = true
+				ts.chains.Delete(k)
+			}
+			chain.mu.Unlock()
+			return true
+		})
 		return true
 	})
 }
