@@ -251,6 +251,16 @@ func HTTPMetrics(m *metrics.Metrics, hist *metrics.Histogram) func(http.Handler)
 // the bucket capacity. Clients that exhaust their tokens receive 429.
 // H-16: without this, a single client can open unlimited SSE connections,
 // begin unbounded transactions, or kick off back-to-back benchmarks.
+// bucketTTL is the idle duration after which a per-IP rate-limit bucket is
+// eligible for eviction. bucketSweepEvery controls how often the sweep runs
+// (every N requests, measured across all clients sharing this middleware
+// instance). Together they bound map growth without requiring a background
+// goroutine.
+const (
+	bucketTTL         = 5 * time.Minute
+	bucketSweepEvery  = 1000
+)
+
 func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 	if rps <= 0 || burst <= 0 {
 		// Disabled — return a no-op middleware so the chain composition is
@@ -259,6 +269,7 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 	}
 	var mu sync.Mutex
 	buckets := make(map[string]*rateBucket)
+	var reqCount int
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
@@ -268,6 +279,15 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 				buckets[r.RemoteAddr] = b
 			}
 			ok = b.take()
+			reqCount++
+			if reqCount%bucketSweepEvery == 0 {
+				cutoff := time.Now().Add(-bucketTTL)
+				for addr, bkt := range buckets {
+					if bkt.last.Before(cutoff) {
+						delete(buckets, addr)
+					}
+				}
+			}
 			mu.Unlock()
 			if !ok {
 				w.Header().Set("Retry-After", "1")
