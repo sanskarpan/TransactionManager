@@ -61,6 +61,10 @@ linters:
         text: 'Error return value of `w\.Write` is not checked'
         linters:
           - errcheck
+      - path: api/apiwire/middleware\.go
+        text: 'Error return value of `w\.Write` is not checked'
+        linters:
+          - errcheck
       # benchmark/tpcb.go intentionally discards Abort/Commit errors
       # in the rollback path (error is already captured).
       - path: benchmark/tpcb\.go

@@ -294,11 +294,11 @@ func TestPruneHistory_AbortRecordNotCapPruned(t *testing.T) {
 // more than MaxActive concurrent transactions, even when many goroutines call
 // Begin simultaneously.
 func TestBegin_ConcurrentCapEnforcement(t *testing.T) {
-	const cap = 5
+	const maxActive = 5
 	const goroutines = 20
 
 	mgr, _ := setupManager()
-	mgr.MaxActive = cap
+	mgr.MaxActive = maxActive
 
 	type result struct {
 		txn *Transaction
@@ -337,11 +337,11 @@ func TestBegin_ConcurrentCapEnforcement(t *testing.T) {
 	}
 
 	assert.Equal(t, 0, otherErr, "no errors other than ErrTooManyTransactions expected")
-	assert.LessOrEqual(t, succeeded, cap, "active transactions must never exceed MaxActive")
+	assert.LessOrEqual(t, succeeded, maxActive, "active transactions must never exceed MaxActive")
 	assert.Greater(t, tooMany, 0, "at least one goroutine must have been rejected")
 	assert.Equal(t, succeeded+tooMany, goroutines, "every Begin must either succeed or return ErrTooManyTransactions")
 
 	// Confirm the live active count also never exceeded the cap.
-	assert.LessOrEqual(t, mgr.ActiveCount(), cap,
+	assert.LessOrEqual(t, mgr.ActiveCount(), maxActive,
 		"ActiveCount must not exceed MaxActive after all goroutines complete")
 }

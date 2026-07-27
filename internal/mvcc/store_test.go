@@ -62,7 +62,7 @@ func TestForEachChainInTable_EmptyKey(t *testing.T) {
 
 	// ForEachChainInTable must visit the empty-key chain
 	found := false
-	s.ForEachChainInTable("accounts", func(rowKey string, c *VersionChain) {
+	s.ForEachChainInTable("accounts", func(rowKey string, _ *VersionChain) {
 		if rowKey == "" {
 			found = true
 		}

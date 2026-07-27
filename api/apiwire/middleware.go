@@ -211,7 +211,7 @@ func AdminToken(token string) func(http.Handler) http.Handler {
 			if token == "" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte(`{"error":"admin token not configured"}`))
+				_, _ = w.Write([]byte(`{"error":"admin token not configured"}`))
 				return
 			}
 			got := r.Header.Get("X-Admin-Token")
@@ -257,10 +257,13 @@ func HTTPMetrics(m *metrics.Metrics, hist *metrics.Histogram) func(http.Handler)
 // instance). Together they bound map growth without requiring a background
 // goroutine.
 const (
-	bucketTTL         = 5 * time.Minute
-	bucketSweepEvery  = 1000
+	bucketTTL        = 5 * time.Minute
+	bucketSweepEvery = 1000
 )
 
+// RateLimit returns middleware that applies a per-remote-addr token bucket.
+// rps==0 or burst==0 disables limiting (local-dev default). Clients that
+// exhaust their tokens receive 429 Too Many Requests.
 func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 	if rps <= 0 || burst <= 0 {
 		// Disabled — return a no-op middleware so the chain composition is
