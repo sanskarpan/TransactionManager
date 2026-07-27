@@ -206,6 +206,76 @@ func TestRateBucket_TakeAfterRefill(t *testing.T) {
 	assert.True(t, b.take(), "should refill after time passes")
 }
 
+// AdminToken tests
+
+// TestAdminToken_EmptyToken_Returns403 verifies that when ADMIN_TOKEN is not
+// configured (token == ""), the middleware returns 403 Forbidden with a JSON
+// body rather than passing the request through to the handler.
+func TestAdminToken_EmptyToken_Returns403(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken("")(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "admin token not configured")
+}
+
+// TestAdminToken_ValidToken verifies that a request with the correct
+// X-Admin-Token header is forwarded to the next handler.
+func TestAdminToken_ValidToken(t *testing.T) {
+	const secret = "supersecrettoken1234"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken(secret)(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	req.Header.Set("X-Admin-Token", secret)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestAdminToken_InvalidToken verifies that a request with a wrong
+// X-Admin-Token header receives 401 Unauthorized.
+func TestAdminToken_InvalidToken(t *testing.T) {
+	const secret = "supersecrettoken1234"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken(secret)(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	req.Header.Set("X-Admin-Token", "wrongtoken")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestAdminToken_MissingToken verifies that a request with no X-Admin-Token
+// header (when the server has a token configured) receives 401 Unauthorized.
+func TestAdminToken_MissingToken(t *testing.T) {
+	const secret = "supersecrettoken1234"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken(secret)(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	// No X-Admin-Token header set.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
 // errors / net / bufio imports used by the Hijack path. Kept here so
 // the file compiles in isolation if the unit test is run without the
 // rest of the package.
