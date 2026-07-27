@@ -226,6 +226,20 @@ func (l *RaftLog) TruncateAfter(index uint64) error {
 	return l.writeToDisk()
 }
 
+// TruncateBefore removes all entries with Index <= lastIncludedIndex.
+// Called after installing a snapshot to compact the in-memory log.
+func (l *RaftLog) TruncateBefore(lastIncludedIndex uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := l.entries[:0]
+	for _, e := range l.entries {
+		if e.Index > lastIncludedIndex {
+			kept = append(kept, e)
+		}
+	}
+	l.entries = kept
+}
+
 // Close closes the underlying file.
 func (l *RaftLog) Close() error {
 	l.mu.Lock()

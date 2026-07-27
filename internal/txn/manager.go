@@ -595,6 +595,14 @@ func (m *Manager) MarkCommitted(id ID) {
 	m.mu.Unlock()
 }
 
+// MarkAborted marks an external (e.g. WAL recovery) transaction ID as aborted
+// without going through the normal Abort path.
+func (m *Manager) MarkAborted(id ID) {
+	m.mu.Lock()
+	m.aborted[id] = struct{}{}
+	m.mu.Unlock()
+}
+
 // VacuumChecker wraps Manager to satisfy both the mvcc.Vacuum interface and
 // mvcc.TxnStatusChecker. It exists because mvcc.TxnID is a type alias for
 // uint64 while ID is a distinct named type; this adapter bridges the two
@@ -1183,6 +1191,12 @@ func (m *Manager) BeginWithID(id ID, protocol ConcurrencyProtocol, isoLevel Isol
 	}
 	m.txns[id] = t
 	m.mu.Unlock()
+
+	if m.WAL != nil {
+		if lsn, err := m.WAL.Begin(uint64(id)); err == nil {
+			t.LastWALLSN = lsn
+		}
+	}
 
 	if m.OnBegin != nil {
 		m.OnBegin(t)

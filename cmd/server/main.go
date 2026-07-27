@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/storage"
 	"github.com/sanskarpan/TransactionManager/internal/txn"
 	"github.com/sanskarpan/TransactionManager/internal/types"
+	"github.com/sanskarpan/TransactionManager/internal/wal"
 )
 
 // buildVersion is overridden at link time (-ldflags "-X main.buildVersion=...").
@@ -67,9 +69,102 @@ func main() {
 	catalog := storage.NewCatalog()
 	storage.SeedCatalog(catalog)
 
+	// --- WAL (optional) ---
+	var walWriter wal.WALWriter = wal.NoopWriter{}
+	var walRec *wal.RecoveryResult
+	walDir := os.Getenv("WAL_DIR")
+	if walDir != "" {
+		if err := os.MkdirAll(walDir, 0750); err != nil {
+			logger.Error("wal: failed to create WAL_DIR", "err", err)
+			return
+		}
+		walMgr, err := wal.OpenManager(walDir)
+		if err != nil {
+			logger.Error("wal: failed to open WAL manager", "err", err)
+			return
+		}
+		defer walMgr.Close()
+		walWriter = walMgr
+		rec, err := wal.RunRecovery(walDir)
+		if err != nil {
+			logger.Error("wal: ARIES recovery failed", "err", err)
+			return
+		}
+		walRec = rec
+		logger.Info("wal: recovery complete",
+			"committed", len(rec.Committed),
+			"aborted", len(rec.Aborted),
+			"redo_ops", len(rec.RedoOps),
+			"undo_txns", len(rec.UndoTxns))
+	}
+
+	// --- Paged storage (optional, requires WAL_DIR) ---
+	var pool *storage.BufferPool
+	storageMode := os.Getenv("STORAGE_MODE")
+	if storageMode == "paged" {
+		if walDir == "" {
+			logger.Error("STORAGE_MODE=paged requires WAL_DIR to be set")
+			return
+		}
+		poolSize := 1000
+		if v := os.Getenv("BUFFER_POOL_SIZE"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				poolSize = n
+			}
+		}
+		heaps := make(map[string]*storage.HeapFile)
+		for _, name := range catalog.List() {
+			h, err := storage.OpenHeapFile(walDir, name)
+			if err != nil {
+				logger.Error("paged storage: failed to open heap file", "table", name, "err", err)
+				return
+			}
+			heaps[name] = h
+		}
+		pool = storage.NewBufferPool(poolSize, heaps, walWriter)
+		for _, name := range catalog.List() {
+			tbl, ok := catalog.Lookup(name)
+			if !ok {
+				continue
+			}
+			pt, err := storage.NewPagedTable(name, tbl.TableColumns(), pool, heaps[name])
+			if err != nil {
+				logger.Error("paged storage: failed to create paged table", "table", name, "err", err)
+				return
+			}
+			if err := pt.RebuildIndex(); err != nil {
+				logger.Error("paged storage: index rebuild failed", "table", name, "err", err)
+				return
+			}
+			catalog.Register(pt)
+		}
+		defer func() {
+			if err := pool.FlushAllDirty(); err != nil {
+				logger.Error("paged storage: flush dirty pages on shutdown", "err", err)
+			}
+			for _, h := range heaps {
+				_ = h.Close()
+			}
+		}()
+		logger.Info("paged storage ready", "pool_frames", poolSize, "tables", len(heaps))
+	}
+
 	// --- Transaction Manager ---
 	mgr := txn.NewManager(catalog)
 	mgr.MaxActive = api.MaxActiveTxns
+	mgr.WAL = walWriter
+
+	// Apply WAL recovery results to manager state.
+	if walRec != nil {
+		applier := &walStorageApplier{catalog: catalog}
+		wal.ApplyRedoOps(walRec.RedoOps, applier)
+		for id := range walRec.Committed {
+			mgr.MarkCommitted(txn.ID(id))
+		}
+		for id := range walRec.Aborted {
+			mgr.MarkAborted(txn.ID(id))
+		}
+	}
 
 	// Seed MVCC store from all catalog tables using txn ID 0 as seed txn
 	const seedTxnID mvcc.TxnID = 0
@@ -323,4 +418,30 @@ func validateTLSConfig(certFile, keyFile string) error {
 		return errors.New("incomplete TLS configuration: both TLS_CERT_FILE and TLS_KEY_FILE must be set, or neither")
 	}
 	return nil
+}
+
+// walStorageApplier implements wal.StorageApplier using the in-memory/paged
+// catalog. Used during ARIES redo/undo recovery at startup.
+type walStorageApplier struct {
+	catalog *storage.Catalog
+}
+
+func (a *walStorageApplier) SetRow(table, key string, vals []byte) {
+	tbl, ok := a.catalog.Lookup(table)
+	if !ok {
+		return
+	}
+	decoded, err := types.DecodeValues(vals)
+	if err != nil {
+		return
+	}
+	tbl.PutRow(storage.RowKey(key), decoded)
+}
+
+func (a *walStorageApplier) DeleteRow(table, key string) {
+	tbl, ok := a.catalog.Lookup(table)
+	if !ok {
+		return
+	}
+	tbl.DeleteRow(storage.RowKey(key))
 }

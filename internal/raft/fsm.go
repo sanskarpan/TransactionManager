@@ -1,9 +1,12 @@
 package raft
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"time"
 
+	"github.com/sanskarpan/TransactionManager/internal/storage"
 	"github.com/sanskarpan/TransactionManager/internal/txn"
 	"github.com/sanskarpan/TransactionManager/internal/types"
 )
@@ -11,6 +14,21 @@ import (
 // FSM is the interface that node.applyLoop calls for each committed entry.
 type FSM interface {
 	Apply(entry Entry) error
+	// Snapshot serializes FSM state to bytes for InstallSnapshot.
+	Snapshot() ([]byte, error)
+	// Restore replaces FSM state from a snapshot.
+	Restore(data []byte) error
+}
+
+// snapshotRow holds a single row in a snapshot payload.
+type snapshotRow struct {
+	Key    string
+	Values []byte // types.EncodeValues output
+}
+
+// snapshotPayload is the gob-encoded body of a Raft snapshot.
+type snapshotPayload struct {
+	TableRows map[string][]snapshotRow
 }
 
 // TxnManagerFSM applies committed Raft entries to txn.Manager.
@@ -62,5 +80,50 @@ func (f *TxnManagerFSM) Apply(e Entry) error {
 		return f.mgr.Abort(txn.ID(e.Command.TxnID), nil)
 	}
 
+	return nil
+}
+
+// Snapshot serializes all catalog table rows to a gob-encoded payload.
+func (f *TxnManagerFSM) Snapshot() ([]byte, error) {
+	payload := snapshotPayload{TableRows: make(map[string][]snapshotRow)}
+	for _, name := range f.mgr.Catalog.List() {
+		tbl, ok := f.mgr.Catalog.Lookup(name)
+		if !ok {
+			continue
+		}
+		rows := tbl.Scan(nil)
+		srows := make([]snapshotRow, 0, len(rows))
+		for _, r := range rows {
+			enc := types.EncodeValues(r.Values)
+			srows = append(srows, snapshotRow{Key: string(r.Key), Values: enc})
+		}
+		payload.TableRows[name] = srows
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(payload); err != nil {
+		return nil, fmt.Errorf("raft fsm snapshot encode: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// Restore replaces catalog table rows from a snapshot payload.
+func (f *TxnManagerFSM) Restore(data []byte) error {
+	var payload snapshotPayload
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&payload); err != nil {
+		return fmt.Errorf("raft fsm snapshot decode: %w", err)
+	}
+	for name, srows := range payload.TableRows {
+		tbl, ok := f.mgr.Catalog.Lookup(name)
+		if !ok {
+			continue
+		}
+		for _, sr := range srows {
+			vals, err := types.DecodeValues(sr.Values)
+			if err != nil {
+				continue
+			}
+			tbl.PutRow(storage.RowKey(sr.Key), vals)
+		}
+	}
 	return nil
 }

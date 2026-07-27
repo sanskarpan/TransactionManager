@@ -25,8 +25,9 @@ type TCPTransport struct {
 	stopCh chan struct{}
 
 	// Callbacks set by Node after transport is created.
-	OnRequestVote   func(NodeID, RequestVoteArgs) (RequestVoteReply, error)
-	OnAppendEntries func(NodeID, AppendEntriesArgs) (AppendEntriesReply, error)
+	OnRequestVote      func(NodeID, RequestVoteArgs) (RequestVoteReply, error)
+	OnAppendEntries    func(NodeID, AppendEntriesArgs) (AppendEntriesReply, error)
+	OnInstallSnapshot  func(NodeID, InstallSnapshotArgs) (InstallSnapshotReply, error)
 }
 
 // NewTCPTransport binds the TCP listener. Does NOT start accepting yet.
@@ -109,6 +110,23 @@ func (t *TCPTransport) handleConn(conn net.Conn) {
 				return
 			}
 
+		case MsgInstallSnapshot:
+			var args InstallSnapshotArgs
+			if err := gob.NewDecoder(bytes.NewReader(body)).Decode(&args); err != nil {
+				return
+			}
+			var reply InstallSnapshotReply
+			if t.OnInstallSnapshot != nil {
+				reply, _ = t.OnInstallSnapshot("", args)
+			}
+			replyFrame, err := encodeFrame(MsgInstallSnapshotReply, reply)
+			if err != nil {
+				return
+			}
+			if _, err := conn.Write(replyFrame); err != nil {
+				return
+			}
+
 		default:
 			// Unknown message type; close connection.
 			return
@@ -138,6 +156,19 @@ func (t *TCPTransport) SendAppendEntries(peer NodeID, addr string, args AppendEn
 	var reply AppendEntriesReply
 	if err := gob.NewDecoder(bytes.NewReader(respBytes)).Decode(&reply); err != nil {
 		return AppendEntriesReply{}, fmt.Errorf("decode AppendEntriesReply: %w", err)
+	}
+	return reply, nil
+}
+
+// SendInstallSnapshot sends an InstallSnapshot RPC to the given peer.
+func (t *TCPTransport) SendInstallSnapshot(peer NodeID, addr string, args InstallSnapshotArgs) (InstallSnapshotReply, error) {
+	respBytes, err := t.send(peer, addr, MsgInstallSnapshot, args)
+	if err != nil {
+		return InstallSnapshotReply{}, err
+	}
+	var reply InstallSnapshotReply
+	if err := gob.NewDecoder(bytes.NewReader(respBytes)).Decode(&reply); err != nil {
+		return InstallSnapshotReply{}, fmt.Errorf("decode InstallSnapshotReply: %w", err)
 	}
 	return reply, nil
 }

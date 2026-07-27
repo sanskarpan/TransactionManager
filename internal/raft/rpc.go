@@ -33,10 +33,26 @@ type AppendEntriesReply struct {
 	ConflictIndex uint64
 }
 
+// InstallSnapshot RPC — sent by leader to bring a lagging follower up to date.
+type InstallSnapshotArgs struct {
+	Term              uint64
+	LeaderID          NodeID
+	LastIncludedIndex uint64
+	LastIncludedTerm  uint64
+	Data              []byte // gob-encoded FSM snapshot
+}
+
+// InstallSnapshotReply is the follower's response to InstallSnapshot.
+type InstallSnapshotReply struct {
+	Term uint64
+}
+
 // MsgType constants for the TCP frame header.
 const (
-	MsgRequestVote        uint8 = 0x01
-	MsgRequestVoteReply   uint8 = 0x02
-	MsgAppendEntries      uint8 = 0x03
-	MsgAppendEntriesReply uint8 = 0x04
+	MsgRequestVote          uint8 = 0x01
+	MsgRequestVoteReply     uint8 = 0x02
+	MsgAppendEntries        uint8 = 0x03
+	MsgAppendEntriesReply   uint8 = 0x04
+	MsgInstallSnapshot      uint8 = 0x05
+	MsgInstallSnapshotReply uint8 = 0x06
 )

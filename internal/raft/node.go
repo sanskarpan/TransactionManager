@@ -77,6 +77,11 @@ type Node struct {
 
 	// Signal for apply loop
 	applySignal chan struct{}
+
+	// Snapshot state
+	snapshotIndex uint64 // lastIncludedIndex of the latest snapshot
+	snapshotTerm  uint64 // lastIncludedTerm of the latest snapshot
+	snapshotData  []byte // most recently taken snapshot bytes (leader sends to lagging followers)
 }
 
 // NewNode creates a new Raft node.
@@ -125,6 +130,9 @@ func (n *Node) Start() error {
 	}
 	n.transport.OnAppendEntries = func(_ NodeID, args AppendEntriesArgs) (AppendEntriesReply, error) {
 		return n.handleAppendEntries("", args), nil
+	}
+	n.transport.OnInstallSnapshot = func(_ NodeID, args InstallSnapshotArgs) (InstallSnapshotReply, error) {
+		return n.handleInstallSnapshot(args), nil
 	}
 
 	if err := n.transport.Start(); err != nil {
@@ -380,11 +388,45 @@ func (n *Node) replicateToPeer(peer NodeID, addr string) {
 		nextIdx = n.log.LastIndex() + 1
 	}
 
+	// If the peer is too far behind (its nextIdx is before our snapshot), send
+	// a snapshot instead of AppendEntries — we no longer have the missing entries.
+	if nextIdx <= n.snapshotIndex {
+		snapIdx := n.snapshotIndex
+		snapTerm := n.snapshotTerm
+		snapData := n.snapshotData
+		term := n.term.Load()
+		n.mu.Unlock()
+		if snapData != nil {
+			args := InstallSnapshotArgs{
+				Term:              term,
+				LeaderID:          n.id,
+				LastIncludedIndex: snapIdx,
+				LastIncludedTerm:  snapTerm,
+				Data:              snapData,
+			}
+			reply, err := n.transport.SendInstallSnapshot(peer, addr, args)
+			if err != nil {
+				return
+			}
+			n.mu.Lock()
+			if reply.Term > n.term.Load() {
+				n.becomeFollower(reply.Term)
+			} else if n.IsLeader() {
+				n.nextIndex[peer] = snapIdx + 1
+				n.matchIndex[peer] = snapIdx
+			}
+			n.mu.Unlock()
+		}
+		return
+	}
+
 	prevLogIndex := nextIdx - 1
 	var prevLogTerm uint64
 	if prevLogIndex > 0 {
 		if e, ok := n.log.Get(prevLogIndex); ok {
 			prevLogTerm = e.Term
+		} else if prevLogIndex == n.snapshotIndex {
+			prevLogTerm = n.snapshotTerm
 		}
 	}
 
@@ -513,6 +555,7 @@ func (n *Node) applyCommitted() {
 
 		n.mu.Lock()
 		n.lastApplied = applyIdx
+		shouldSnapshot := n.lastApplied-n.snapshotIndex >= 1000
 		n.mu.Unlock()
 
 		// Resolve pending proposal if any.
@@ -522,7 +565,67 @@ func (n *Node) applyCommitted() {
 			pp.result <- ProposalResult{Index: applyIdx}
 		}
 		n.pendingMu.Unlock()
+
+		// Trigger a snapshot every 1000 applied entries to bound log growth.
+		if shouldSnapshot {
+			n.triggerSnapshot()
+		}
 	}
+}
+
+// triggerSnapshot takes a point-in-time snapshot of the FSM and compacts the log.
+func (n *Node) triggerSnapshot() {
+	data, err := n.fsm.Snapshot()
+	if err != nil {
+		return
+	}
+	n.mu.Lock()
+	idx := n.lastApplied
+	var term uint64
+	if e, ok := n.log.Get(idx); ok {
+		term = e.Term
+	}
+	n.snapshotIndex = idx
+	n.snapshotTerm = term
+	n.snapshotData = data
+	n.log.TruncateBefore(idx)
+	n.mu.Unlock()
+}
+
+// handleInstallSnapshot applies a snapshot sent by the leader.
+func (n *Node) handleInstallSnapshot(args InstallSnapshotArgs) InstallSnapshotReply {
+	n.mu.Lock()
+	currentTerm := n.term.Load()
+	if args.Term < currentTerm {
+		n.mu.Unlock()
+		return InstallSnapshotReply{Term: currentTerm}
+	}
+	if args.Term > currentTerm {
+		n.term.Store(args.Term)
+		n.role.Store(Follower)
+		n.votedFor.Store(NodeID(""))
+		_ = n.persistState()
+	}
+	n.resetElectionTimer()
+	n.mu.Unlock()
+
+	if err := n.fsm.Restore(args.Data); err != nil {
+		return InstallSnapshotReply{Term: n.term.Load()}
+	}
+
+	n.mu.Lock()
+	n.log.TruncateBefore(args.LastIncludedIndex)
+	n.snapshotIndex = args.LastIncludedIndex
+	n.snapshotTerm = args.LastIncludedTerm
+	if n.commitIndex.Load() < args.LastIncludedIndex {
+		n.commitIndex.Store(args.LastIncludedIndex)
+	}
+	if n.lastApplied < args.LastIncludedIndex {
+		n.lastApplied = args.LastIncludedIndex
+	}
+	n.mu.Unlock()
+
+	return InstallSnapshotReply{Term: n.term.Load()}
 }
 
 // handleRequestVote handles an incoming RequestVote RPC.
