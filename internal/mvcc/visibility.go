@@ -5,6 +5,10 @@ type TxnStatusChecker interface {
 	IsCommitted(id TxnID) bool
 	IsAborted(id TxnID) bool
 	IsActive(id TxnID) bool
+	// TxnStatus returns the active and committed status of id under a single
+	// lock, preventing a TOCTOU race between separate IsActive/IsCommitted
+	// calls (e.g. a PruneHistory evicting a committed record between them).
+	TxnStatus(id TxnID) (active, committed bool)
 }
 
 // SnapshotView is satisfied by txn.Snapshot (avoids circular import mvcc→txn)

@@ -632,6 +632,19 @@ func (m *Manager) IsActive(id ID) bool {
 	return ok
 }
 
+// TxnStatus returns the active and committed status of id under a single lock,
+// preventing a race between separate IsActive/IsCommitted calls (e.g. a
+// concurrent PruneHistory evicting a committed record between them — a TOCTOU
+// that would cause IsCommitted to return false for a txn that DID commit,
+// yielding a missed write-write conflict / lost update).
+func (m *Manager) TxnStatus(id ID) (active, committed bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, active = m.txns[id]
+	_, committed = m.committed[id]
+	return
+}
+
 // GetTxn returns the active transaction for id, if present. Note that
 // terminal-state txns are NOT returned (they are removed from the active
 // map at commit/abort time); use IsCommitted/IsAborted for those.
@@ -734,6 +747,9 @@ type mvccStatusChecker struct{ m *Manager }
 func (c mvccStatusChecker) IsCommitted(id mvcc.TxnID) bool { return c.m.IsCommitted(ID(id)) }
 func (c mvccStatusChecker) IsAborted(id mvcc.TxnID) bool   { return c.m.IsAborted(ID(id)) }
 func (c mvccStatusChecker) IsActive(id mvcc.TxnID) bool    { return c.m.IsActive(ID(id)) }
+func (c mvccStatusChecker) TxnStatus(id mvcc.TxnID) (active, committed bool) {
+	return c.m.TxnStatus(ID(id))
+}
 
 // applyMVCCUndo undoes MVCC version chain changes for an aborted transaction.
 // For every written key, apply BOTH RemoveByXMin AND ClearXMax:

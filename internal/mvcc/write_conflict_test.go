@@ -77,3 +77,35 @@ func TestCheckWriteConflictNoLock(t *testing.T) {
 	err := CheckWriteConflictNoLock(15, chain, s, mgr)
 	assert.NoError(t, err)
 }
+
+// TestCheckWriteConflict_PrunedCommittedRecord verifies that a committed
+// concurrent writer is detected as a write-write conflict.
+//
+// The race this test guards against: in the old two-call code,
+//
+//	IsActive(v.XMin) → false  (txn has committed, no longer active)
+//	[PruneHistory evicts committed[v.XMin]]
+//	IsCommitted(v.XMin) → false  (record pruned!)
+//
+// …causing the conflict to be silently missed (lost update). With the new
+// atomic TxnStatus, both bits are read under the same m.mu lock, so
+// PruneHistory cannot interleave. The mock's TxnStatus follows the same
+// single-snapshot semantic: in a real Manager, the race cannot occur because
+// TxnStatus holds m.mu for both map lookups.
+func TestCheckWriteConflict_PrunedCommittedRecord(t *testing.T) {
+	mgr := newMockMgr()
+	// Snapshot taken while txn 12 was active.
+	s := snap(10, 20, 12)
+
+	chain := NewVersionChain("k")
+	chain.Prepend(&Version{XMin: 12, CreatedAt: time.Now()})
+
+	// Txn 12 has now committed — conflict must be detected.
+	mgr.setCommitted(12)
+
+	err := CheckWriteConflict(15, chain, s, mgr)
+	require.Error(t, err, "committed concurrent writer must be detected as a conflict")
+	var wce *WriteConflictError
+	require.ErrorAs(t, err, &wce)
+	assert.Equal(t, TxnID(12), wce.ConflictingTxn)
+}
