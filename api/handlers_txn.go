@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -62,8 +63,8 @@ func (s *Server) handleBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// H-16: cap concurrent active transactions so a single client cannot OOM
-	// the process by spinning up unbounded Begin calls.
+	// Early-exit hint before acquiring the manager lock; the real atomic
+	// cap enforcement is inside Manager.Begin under m.mu.
 	if s.txnMgr.ActiveCount() >= MaxActiveTxns {
 		errResponse(w, http.StatusServiceUnavailable, "too many active transactions")
 		return
@@ -72,6 +73,12 @@ func (s *Server) handleBegin(w http.ResponseWriter, r *http.Request) {
 	t, err := s.txnMgr.Begin(proto, iso, timeout)
 	if err != nil {
 		s.logger.Error("txn op failed", "err", err, "req_id", reqIDFromCtx(r))
+		// ErrTooManyTransactions fires when concurrent goroutines race past the
+		// pre-check above. Map it to 503 so the client gets the same status.
+		if errors.Is(err, txn.ErrTooManyTransactions) {
+			errResponse(w, http.StatusServiceUnavailable, "too many active transactions")
+			return
+		}
 		errWrite(w, err)
 		return
 	}

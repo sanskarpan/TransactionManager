@@ -1,6 +1,7 @@
 package txn
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -287,4 +288,60 @@ func TestPruneHistory_AbortRecordNotCapPruned(t *testing.T) {
 	assert.True(t, mgr.IsAborted(targetID),
 		"IsAborted must still return true for %v after PruneHistory; "+
 			"cap-pruning this record would allow dirty reads", targetID)
+}
+
+// TestBegin_ConcurrentCapEnforcement verifies that Manager.Begin never allows
+// more than MaxActive concurrent transactions, even when many goroutines call
+// Begin simultaneously.
+func TestBegin_ConcurrentCapEnforcement(t *testing.T) {
+	const cap = 5
+	const goroutines = 20
+
+	mgr, _ := setupManager()
+	mgr.MaxActive = cap
+
+	type result struct {
+		txn *Transaction
+		err error
+	}
+	results := make([]result, goroutines)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	// barrier ensures all goroutines start as simultaneously as possible.
+	barrier := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-barrier
+			t, err := mgr.Begin(Protocol2PL, ReadCommitted, 5*time.Second)
+			results[i] = result{t, err}
+		}()
+	}
+	close(barrier) // release all goroutines at once
+	wg.Wait()
+
+	// Count successes and ErrTooManyTransactions failures.
+	var succeeded, tooMany, otherErr int
+	for _, r := range results {
+		switch {
+		case r.err == nil:
+			succeeded++
+		case errors.Is(r.err, ErrTooManyTransactions):
+			tooMany++
+		default:
+			otherErr++
+			t.Errorf("unexpected error: %v", r.err)
+		}
+	}
+
+	assert.Equal(t, 0, otherErr, "no errors other than ErrTooManyTransactions expected")
+	assert.LessOrEqual(t, succeeded, cap, "active transactions must never exceed MaxActive")
+	assert.Greater(t, tooMany, 0, "at least one goroutine must have been rejected")
+	assert.Equal(t, succeeded+tooMany, goroutines, "every Begin must either succeed or return ErrTooManyTransactions")
+
+	// Confirm the live active count also never exceeded the cap.
+	assert.LessOrEqual(t, mgr.ActiveCount(), cap,
+		"ActiveCount must not exceed MaxActive after all goroutines complete")
 }

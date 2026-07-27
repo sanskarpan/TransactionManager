@@ -68,6 +68,7 @@ func main() {
 
 	// --- Transaction Manager ---
 	mgr := txn.NewManager(catalog)
+	mgr.MaxActive = api.MaxActiveTxns
 
 	// Seed MVCC store from all catalog tables using txn ID 0 as seed txn
 	const seedTxnID mvcc.TxnID = 0

@@ -15,6 +15,10 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/types"
 )
 
+// ErrTooManyTransactions is returned by Manager.Begin when MaxActive is
+// set and the number of active transactions has reached that limit.
+var ErrTooManyTransactions = errors.New("too many active transactions")
+
 // Manager is the central orchestrator that owns every transaction's
 // lifecycle, hands out monotonic IDs, and bridges the two concurrency
 // protocols (2PL and MVCC) to the lock table, MVCC store, and SSI
@@ -26,6 +30,10 @@ type Manager struct {
 	committed map[ID]struct{}
 	aborted   map[ID]struct{}
 	nextID    atomic.Uint64
+
+	// MaxActive caps the number of concurrently-active transactions.
+	// Zero means no cap. Enforced atomically inside Begin under m.mu.
+	MaxActive int
 
 	// epochMu serialises opEpoch reads (from MVCC goroutines) and
 	// writes (from Reset). A separate mutex avoids the self-deadlock
@@ -118,15 +126,20 @@ func (m *Manager) nextTxnID() ID {
 // (for MVCC + non-ReadCommitted) takes a snapshot of the active set so
 // RR / Serializable reads see a consistent view. The lockTimeout defaults
 // to 5s when zero; the returned txn is active and ready for read/write.
+// If MaxActive is non-zero and the active count has reached that limit,
+// Begin returns ErrTooManyTransactions without allocating an ID.
 func (m *Manager) Begin(protocol ConcurrencyProtocol, isoLevel IsolationLevel, lockTimeout time.Duration) (*Transaction, error) {
 	if lockTimeout == 0 {
 		lockTimeout = 5 * time.Second
 	}
 
+	m.mu.Lock()
+	if m.MaxActive > 0 && len(m.txns) >= m.MaxActive {
+		m.mu.Unlock()
+		return nil, ErrTooManyTransactions
+	}
 	id := m.nextTxnID()
 	txn := NewTransaction(id, protocol, isoLevel, lockTimeout)
-
-	m.mu.Lock()
 	// Take MVCC snapshot if needed
 	if protocol == ProtocolMVCC && isoLevel != ReadCommitted {
 		txn.Snapshot = m.takeSnapshot()
