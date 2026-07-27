@@ -534,11 +534,13 @@ func (m *Manager) PruneHistory() int {
 			removed++
 		}
 	}
-	// Cap: if either map is still above MaxHistoryRetained, drop the
-	// oldest entries. The cap is a hard memory bound; entries pruned here
-	// are the oldest (smallest IDs), and their version chains are
-	// expected to have been reaped already (vacuum removes versions whose
-	// deleter is below the horizon before ReapEmpty drops empty chains).
+	// Cap: if the committed map exceeds MaxHistoryRetained, drop the oldest
+	// entries. We intentionally do NOT cap-prune the aborted map: cap-pruning
+	// could remove abort records for IDs above the oldest-active horizon,
+	// causing IsAborted to return false for a genuinely aborted txn — and
+	// the committedBeforeSnapshot check in IsVisible would treat that txn's
+	// rolled-back writes as visible (dirty read). The normal horizon-based
+	// pruning above keeps the aborted map bounded in practice.
 	for excess := len(m.committed) - MaxHistoryRetained; excess > 0; excess-- {
 		var oldestID ID
 		var first = true
@@ -552,21 +554,6 @@ func (m *Manager) PruneHistory() int {
 			break
 		}
 		delete(m.committed, oldestID)
-		removed++
-	}
-	for excess := len(m.aborted) - MaxHistoryRetained; excess > 0; excess-- {
-		var oldestID ID
-		var first = true
-		for id := range m.aborted {
-			if first || id < oldestID {
-				oldestID = id
-				first = false
-			}
-		}
-		if first {
-			break
-		}
-		delete(m.aborted, oldestID)
 		removed++
 	}
 	return removed
