@@ -261,7 +261,7 @@ func (s *Server) setupRouter() {
 
 	// Scenarios
 	r.Get("/api/scenarios", s.handleListScenarios)
-	r.Post("/api/scenarios/{name}/run", s.handleRunScenario)
+	r.With(apiwire.AdminToken(s.cfg.AdminToken)).Post("/api/scenarios/{name}/run", s.handleRunScenario)
 
 	// Benchmark (gated)
 	r.With(apiwire.AdminToken(s.cfg.AdminToken)).Post("/api/benchmark/run", s.handleBenchmarkRun)
