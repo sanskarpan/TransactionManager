@@ -1163,3 +1163,38 @@ func (m *Manager) TwoPLWrite(txn *Transaction, table, key string, values []types
 	txn.addWrite(storage.RowKey(key))
 	return nil
 }
+
+// BeginWithID starts a new transaction using the provided id instead of
+// allocating a new one. Used by the Raft FSM on followers to apply the
+// leader-assigned TxnID deterministically.
+func (m *Manager) BeginWithID(id ID, protocol ConcurrencyProtocol, isoLevel IsolationLevel, lockTimeout time.Duration) (*Transaction, error) {
+	if lockTimeout == 0 {
+		lockTimeout = 5 * time.Second
+	}
+
+	m.mu.Lock()
+	if m.MaxActive > 0 && len(m.txns) >= m.MaxActive {
+		m.mu.Unlock()
+		return nil, ErrTooManyTransactions
+	}
+	t := NewTransaction(id, protocol, isoLevel, lockTimeout)
+	if protocol == ProtocolMVCC && isoLevel != ReadCommitted {
+		t.Snapshot = m.takeSnapshot()
+	}
+	m.txns[id] = t
+	m.mu.Unlock()
+
+	if m.OnBegin != nil {
+		m.OnBegin(t)
+	}
+	return t, nil
+}
+
+// GetActiveTxn returns the active transaction for id, or nil if not found.
+// Terminal-state transactions (committed/aborted) are not returned.
+func (m *Manager) GetActiveTxn(id ID) *Transaction {
+	m.mu.RLock()
+	t := m.txns[id]
+	m.mu.RUnlock()
+	return t
+}

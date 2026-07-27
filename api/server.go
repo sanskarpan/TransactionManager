@@ -80,6 +80,21 @@ type Server struct {
 	sseCtx    context.Context
 	sseCancel context.CancelFunc
 	sseWg     sync.WaitGroup
+
+	// Raft, when non-nil, routes writes through the Raft consensus layer.
+	// Set after construction by cmd/server/main.go when RAFT_MODE is configured.
+	Raft RaftProposer
+}
+
+// RaftProposer is the interface the api package uses to interact with Raft.
+// Defined here (not in the raft package) to avoid an import cycle.
+type RaftProposer interface {
+	ProposeBegin(txnID uint64, proto, iso uint8) error
+	ProposeWrite(txnID uint64, table, key string, op uint8, before, after []byte) error
+	ProposeCommit(txnID uint64) error
+	ProposeAbort(txnID uint64) error
+	IsLeader() bool
+	LeaderAddr() string
 }
 
 // NewServer creates a new HTTP API server.

@@ -18,6 +18,7 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/lock"
 	"github.com/sanskarpan/TransactionManager/internal/metrics"
 	"github.com/sanskarpan/TransactionManager/internal/mvcc"
+	"github.com/sanskarpan/TransactionManager/internal/raft"
 	"github.com/sanskarpan/TransactionManager/internal/storage"
 	"github.com/sanskarpan/TransactionManager/internal/txn"
 	"github.com/sanskarpan/TransactionManager/internal/types"
@@ -156,6 +157,52 @@ func main() {
 		AdminToken:       adminToken,
 		HTTPLatencyHist:  httpLatency,
 	})
+
+	// --- Raft Consensus (optional) ---
+	// RAFT_MODE: if set to "single" or "cluster", start Raft.
+	raftMode := os.Getenv("RAFT_MODE")
+	if raftMode == "single" || raftMode == "cluster" {
+		raftID := os.Getenv("RAFT_ID")
+		raftDataDir := os.Getenv("RAFT_DATA_DIR")
+		raftListenAddr := os.Getenv("RAFT_LISTEN_ADDR")
+		raftPeersStr := os.Getenv("RAFT_PEERS")
+
+		if raftID == "" || raftDataDir == "" || raftListenAddr == "" {
+			logger.Error("RAFT_MODE requires RAFT_ID, RAFT_DATA_DIR, and RAFT_LISTEN_ADDR")
+			return
+		}
+
+		// Parse peers: "node1=:9091,node2=:9092"
+		peers := make(map[raft.NodeID]string)
+		if raftPeersStr != "" {
+			for _, p := range strings.Split(raftPeersStr, ",") {
+				parts := strings.SplitN(p, "=", 2)
+				if len(parts) == 2 {
+					peers[raft.NodeID(parts[0])] = parts[1]
+				}
+			}
+		}
+		// Remove self from peers.
+		delete(peers, raft.NodeID(raftID))
+
+		transport, err := raft.NewTCPTransport(raftListenAddr)
+		if err != nil {
+			logger.Error("raft transport failed", "err", err)
+			return
+		}
+		fsm := raft.NewTxnManagerFSM(mgr)
+		node, err := raft.NewNode(raft.NodeID(raftID), peers, raftDataDir, transport, fsm)
+		if err != nil {
+			logger.Error("raft node failed", "err", err)
+			return
+		}
+		if err := node.Start(); err != nil {
+			logger.Error("raft start failed", "err", err)
+			return
+		}
+		defer node.Stop()
+		srv.Raft = api.NewRaftAdapter(node)
+	}
 
 	httpServer := &http.Server{
 		Addr:        addr,
