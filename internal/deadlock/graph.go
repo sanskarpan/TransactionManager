@@ -43,14 +43,12 @@ func (g *WaitForGraph) RemoveNode(txnID TxnID) {
 	}
 }
 
-// RemoveEdges drops every edge originating from txnID.
+// RemoveEdges drops all edges originating FROM txnID (i.e. "txnID waits for X" edges).
+// It does NOT remove incoming edges pointing TO txnID — those belong to RemoveNode.
 func (g *WaitForGraph) RemoveEdges(txnID TxnID) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.edges, txnID)
-	for from := range g.edges {
-		delete(g.edges[from], txnID)
-	}
 }
 
 // Nodes returns a snapshot of all node IDs currently in the graph.

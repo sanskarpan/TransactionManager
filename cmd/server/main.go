@@ -59,7 +59,7 @@ func main() {
 		os.Exit(1)
 	}
 	if adminToken == "" {
-		logger.Warn("ADMIN_TOKEN unset — destructive endpoints (/api/reset, /api/mvcc/vacuum, /api/benchmark/run) are open; never deploy to production like this")
+		logger.Warn("ADMIN_TOKEN unset — destructive admin endpoints return 403; set ADMIN_TOKEN to enable them")
 	}
 
 	// --- Storage ---
@@ -68,6 +68,7 @@ func main() {
 
 	// --- Transaction Manager ---
 	mgr := txn.NewManager(catalog)
+	mgr.MaxActive = api.MaxActiveTxns
 
 	// Seed MVCC store from all catalog tables using txn ID 0 as seed txn
 	const seedTxnID mvcc.TxnID = 0
@@ -102,6 +103,7 @@ func main() {
 
 	// Wire WFG adapter into manager
 	mgr.WFG.AddEdgeFn = wfg.AddEdge
+	mgr.WFG.RemoveEdgesFn = wfg.RemoveEdges
 	mgr.WFG.RemoveNodeFn = wfg.RemoveNode
 
 	dd.Start()

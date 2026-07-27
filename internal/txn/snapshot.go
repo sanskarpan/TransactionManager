@@ -29,8 +29,10 @@ func (s *Snapshot) IsCommitted(id ID) bool {
 	if id < s.Xmin {
 		return true
 	}
-	// Xmin <= id < Xmax: committed only if not Xmin itself and not in Active list
-	return id != s.Xmin && !s.Contains(id)
+	// Xmin <= id < Xmax: committed only if not in Active list.
+	// takeSnapshot() always includes Xmin in Active, so Contains(Xmin) is always
+	// true and the former "id != s.Xmin" guard was redundant dead code.
+	return !s.Contains(id)
 }
 
 // ContainsID implements mvcc.SnapshotView — reports whether txnID was active at snapshot time.

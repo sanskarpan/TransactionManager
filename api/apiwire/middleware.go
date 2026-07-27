@@ -194,9 +194,10 @@ func CORS(allowOrigins []string) func(http.Handler) http.Handler {
 }
 
 // AdminToken gates destructive endpoints behind a shared-secret header.
-// If AdminToken is empty (the default in local dev), the middleware is a
-// no-op so the existing frontend works unchanged. When set, requests
-// missing X-Admin-Token or carrying the wrong value get 401.
+// If AdminToken is empty (ADMIN_TOKEN not set), the middleware returns
+// HTTP 403 Forbidden so the endpoints are unavailable rather than
+// unprotected. When set, requests missing X-Admin-Token or carrying the
+// wrong value get 401.
 //
 // H-21: comparison uses crypto/subtle.ConstantTimeCompare so a remote
 // caller cannot recover the token byte-by-byte via timing. A short token
@@ -208,7 +209,9 @@ func AdminToken(token string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if token == "" {
-				next.ServeHTTP(w, r)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"admin token not configured"}`))
 				return
 			}
 			got := r.Header.Get("X-Admin-Token")
@@ -248,6 +251,16 @@ func HTTPMetrics(m *metrics.Metrics, hist *metrics.Histogram) func(http.Handler)
 // the bucket capacity. Clients that exhaust their tokens receive 429.
 // H-16: without this, a single client can open unlimited SSE connections,
 // begin unbounded transactions, or kick off back-to-back benchmarks.
+// bucketTTL is the idle duration after which a per-IP rate-limit bucket is
+// eligible for eviction. bucketSweepEvery controls how often the sweep runs
+// (every N requests, measured across all clients sharing this middleware
+// instance). Together they bound map growth without requiring a background
+// goroutine.
+const (
+	bucketTTL         = 5 * time.Minute
+	bucketSweepEvery  = 1000
+)
+
 func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 	if rps <= 0 || burst <= 0 {
 		// Disabled — return a no-op middleware so the chain composition is
@@ -256,6 +269,7 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 	}
 	var mu sync.Mutex
 	buckets := make(map[string]*rateBucket)
+	var reqCount int
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
@@ -265,6 +279,15 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 				buckets[r.RemoteAddr] = b
 			}
 			ok = b.take()
+			reqCount++
+			if reqCount%bucketSweepEvery == 0 {
+				cutoff := time.Now().Add(-bucketTTL)
+				for addr, bkt := range buckets {
+					if bkt.last.Before(cutoff) {
+						delete(buckets, addr)
+					}
+				}
+			}
 			mu.Unlock()
 			if !ok {
 				w.Header().Set("Retry-After", "1")

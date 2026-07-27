@@ -113,7 +113,7 @@ func (s *Store) ForEachChainInTable(table string, fn func(rowKey string, chain *
 	prefix := table + ":"
 	s.chains.Range(func(k, v interface{}) bool {
 		key := k.(string)
-		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
 			rowKey := key[len(prefix):]
 			fn(rowKey, v.(*VersionChain))
 		}

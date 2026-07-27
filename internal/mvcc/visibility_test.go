@@ -25,6 +25,10 @@ func (m *mockMgr) IsActive(id TxnID) bool {
 	return !m.committed[id] && !m.aborted[id]
 }
 
+func (m *mockMgr) TxnStatus(id TxnID) (active, committed bool) {
+	return !m.committed[id] && !m.aborted[id], m.committed[id]
+}
+
 func (m *mockMgr) setCommitted(id TxnID) { m.committed[id] = true }
 func (m *mockMgr) setAborted(id TxnID)   { m.aborted[id] = true }
 

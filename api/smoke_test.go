@@ -21,6 +21,10 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/types"
 )
 
+// smokeAdminToken is the admin token used by smoke tests that call
+// admin-gated endpoints (/api/reset, /api/scenarios/{name}/run).
+const smokeAdminToken = "smoke-test-admin-token-32chars!"
+
 func newTestServer(t *testing.T) *api.Server {
 	t.Helper()
 	catalog := storage.NewCatalog()
@@ -57,9 +61,27 @@ func newTestServer(t *testing.T) *api.Server {
 	mgr.OnCommit = func(_ *txn.Transaction) { m.TxnCommits.Add(1) }
 	mgr.OnAbort = func(_ *txn.Transaction, _ error) { m.TxnAborts.Add(1) }
 
-	srv := api.NewServerWithConfig(mgr, dd, wfg, dlHistory, vac, m, api.ServerConfig{})
+	// Admin-gated endpoints (/api/reset, /api/scenarios/{name}/run) now
+	// require a token. Smoke tests use smokeAdminToken so they can reach
+	// those endpoints.
+	srv := api.NewServerWithConfig(mgr, dd, wfg, dlHistory, vac, m, api.ServerConfig{AdminToken: smokeAdminToken})
 	srv.SetReadyForTest(true)
 	return srv
+}
+
+// postAdmin is like post but includes X-Admin-Token for admin-gated endpoints.
+func postAdmin(t *testing.T, srv *api.Server, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		require.NoError(t, json.NewEncoder(&buf).Encode(body))
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Token", smokeAdminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	return w
 }
 
 func post(t *testing.T, srv *api.Server, path string, body interface{}) *httptest.ResponseRecorder {
@@ -222,7 +244,7 @@ func TestSmoke_AllScenarios(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := post(t, srv, "/api/scenarios/"+tc.name+"/run", map[string]interface{}{
+			w := postAdmin(t, srv, "/api/scenarios/"+tc.name+"/run", map[string]interface{}{
 				"protocol":  tc.protocol,
 				"isolation": tc.isolation,
 			})
@@ -306,8 +328,8 @@ func TestSmoke_Reset(t *testing.T) {
 		require.Equal(t, http.StatusOK, w.Code)
 	}
 
-	// Reset
-	w := post(t, srv, "/api/reset", nil)
+	// Reset (admin-gated endpoint — requires token)
+	w := postAdmin(t, srv, "/api/reset", nil)
 	require.Equal(t, http.StatusOK, w.Code)
 	var res map[string]interface{}
 	decode(t, w, &res)

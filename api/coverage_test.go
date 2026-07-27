@@ -167,9 +167,10 @@ func TestCoverage_handleMVCCStats(t *testing.T) {
 }
 
 func TestCoverage_handleVacuum(t *testing.T) {
-	srv := newAPIServer(t)
+	srv := newAPIServerWithConfig(t, ServerConfig{AdminToken: edgeTestAdminToken})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/mvcc/vacuum", http.NoBody)
+	req.Header.Set("X-Admin-Token", edgeTestAdminToken)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)

@@ -118,15 +118,12 @@ func (s *Server) handleSSEWFG(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(WFGStreamTickInterval)
 	defer ticker.Stop()
 
-	// CT-04: tie the per-connection select to the server's sseCtx so
-	// Shutdown drains this handler promptly.
-	ctx, cancel := mergeContexts(r.Context(), s.sseCtx)
-	defer cancel()
-
 	reqID := reqIDFromCtx(r)
 	for {
 		select {
-		case <-ctx.Done():
+		case <-r.Context().Done():
+			return
+		case <-s.sseCtx.Done():
 			return
 		case <-ticker.C:
 			if s.wfg == nil {

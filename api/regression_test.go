@@ -113,36 +113,57 @@ func TestC07_AdminToken_GatedEndpoints(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "correct token must pass")
 }
 
-// TestC07_NoAdminToken_OpenInDev confirms that when AdminToken is empty
-// (default local dev), the gated endpoints are open.
+// TestC07_NoAdminToken_OpenInDev confirms that when AdminToken is empty,
+// admin-gated endpoints return 403 Forbidden (not open, not a 401).
+// An unconfigured token means the operator hasn't set up auth — the
+// endpoint is unavailable rather than unprotected.
 func TestC07_NoAdminToken_OpenInDev(t *testing.T) {
 	srv := newTestServerWithConfig(t, api.ServerConfig{})
 	w := postBody(t, srv, "/api/reset", strings.NewReader(`{}`))
-	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, http.StatusForbidden, w.Code, "empty admin token must return 403, not open the endpoint")
 }
 
-// TestC08_UnknownIsolation_400 verifies scenario/benchmark endpoints
-// reject unknown isolation with 400 rather than silently falling back.
+// testAdminToken is the shared token used by tests that need to pass
+// auth on admin-gated endpoints. It must be long enough to pass any
+// MinAdminTokenLen check enforced at startup.
+const testAdminToken = "test-admin-token-32-chars-ok!"
+
+// postWithToken sends a POST request with X-Admin-Token set.
+func postWithToken(t *testing.T, srv *api.Server, path string, body io.Reader, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Token", token)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	return w
+}
+
+// TestC08_UnknownIsolation_400 verifies the scenario endpoint rejects
+// unknown isolation with 400 rather than silently falling back.
+// Auth is configured so we exercise the input-validation path (not 403).
 func TestC08_UnknownIsolation_400(t *testing.T) {
-	srv := newTestServerWithConfig(t, api.ServerConfig{})
+	srv := newTestServerWithConfig(t, api.ServerConfig{AdminToken: testAdminToken})
 	body := `{"protocol":"mvcc","isolation":"bogus"}`
-	w := postBody(t, srv, "/api/scenarios/dirty_read/run", strings.NewReader(body))
+	w := postWithToken(t, srv, "/api/scenarios/dirty_read/run", strings.NewReader(body), testAdminToken)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-// TestC08_UnknownProtocol_400 verifies the protocol field is validated.
+// TestC08_UnknownProtocol_400 verifies the protocol field is validated
+// after auth passes (requires a configured token).
 func TestC08_UnknownProtocol_400(t *testing.T) {
-	srv := newTestServerWithConfig(t, api.ServerConfig{})
+	srv := newTestServerWithConfig(t, api.ServerConfig{AdminToken: testAdminToken})
 	body := `{"protocol":"bogus","isolation":"read_committed"}`
-	w := postBody(t, srv, "/api/scenarios/dirty_read/run", strings.NewReader(body))
+	w := postWithToken(t, srv, "/api/scenarios/dirty_read/run", strings.NewReader(body), testAdminToken)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // TestC08_BenchmarkUnknownIsolation_400 confirms the same on benchmark.
+// Auth is configured so we exercise the input-validation path (not 403).
 func TestC08_BenchmarkUnknownIsolation_400(t *testing.T) {
-	srv := newTestServerWithConfig(t, api.ServerConfig{})
+	srv := newTestServerWithConfig(t, api.ServerConfig{AdminToken: testAdminToken})
 	body := `{"protocol":"mvcc","isolation":"bogus"}`
-	w := postBody(t, srv, "/api/benchmark/run", strings.NewReader(body))
+	w := postWithToken(t, srv, "/api/benchmark/run", strings.NewReader(body), testAdminToken)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -150,15 +171,15 @@ func TestC08_BenchmarkUnknownIsolation_400(t *testing.T) {
 // return distinct IDs (previously both produced "job-<same-second>" and
 // the second overwrote the first's result slot).
 func TestH01_BenchmarkJobIDs_Monotonic(t *testing.T) {
-	srv := newTestServerWithConfig(t, api.ServerConfig{})
+	srv := newTestServerWithConfig(t, api.ServerConfig{AdminToken: testAdminToken})
 	body := `{"protocol":"mvcc","isolation":"read_committed","durationSec":1,"concurrency":2,"numAccounts":10}`
-	w1 := postBody(t, srv, "/api/benchmark/run", strings.NewReader(body))
+	w1 := postWithToken(t, srv, "/api/benchmark/run", strings.NewReader(body), testAdminToken)
 	require.Equal(t, http.StatusOK, w1.Code)
 	var r1 map[string]interface{}
 	require.NoError(t, json.NewDecoder(w1.Body).Decode(&r1))
 	id1 := r1["jobId"].(string)
 
-	w2 := postBody(t, srv, "/api/benchmark/run", strings.NewReader(body))
+	w2 := postWithToken(t, srv, "/api/benchmark/run", strings.NewReader(body), testAdminToken)
 	require.Equal(t, http.StatusOK, w2.Code)
 	var r2 map[string]interface{}
 	require.NoError(t, json.NewDecoder(w2.Body).Decode(&r2))

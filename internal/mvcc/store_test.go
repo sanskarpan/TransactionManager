@@ -53,3 +53,21 @@ func TestStore_SeedMVCCStore(_ *testing.T) {
 	s := NewStore()
 	SeedMVCCStore(s, "t", nil, 42)
 }
+
+func TestForEachChainInTable_EmptyKey(t *testing.T) {
+	s := NewStore()
+	// Write a version with empty row key
+	chain := s.GetOrCreateChain("accounts", "")
+	chain.Prepend(&Version{XMin: 1, Data: nil})
+
+	// ForEachChainInTable must visit the empty-key chain
+	found := false
+	s.ForEachChainInTable("accounts", func(rowKey string, c *VersionChain) {
+		if rowKey == "" {
+			found = true
+		}
+	})
+	if !found {
+		t.Fatal("ForEachChainInTable did not visit the chain for empty row key")
+	}
+}

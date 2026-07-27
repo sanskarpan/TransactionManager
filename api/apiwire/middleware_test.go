@@ -3,6 +3,7 @@ package apiwire
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -204,6 +205,105 @@ func TestRateBucket_TakeAfterRefill(t *testing.T) {
 
 	b.last = b.last.Add(-time.Second)
 	assert.True(t, b.take(), "should refill after time passes")
+}
+
+// AdminToken tests
+
+// TestAdminToken_EmptyToken_Returns403 verifies that when ADMIN_TOKEN is not
+// configured (token == ""), the middleware returns 403 Forbidden with a JSON
+// body rather than passing the request through to the handler.
+func TestAdminToken_EmptyToken_Returns403(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken("")(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "admin token not configured")
+}
+
+// TestAdminToken_ValidToken verifies that a request with the correct
+// X-Admin-Token header is forwarded to the next handler.
+func TestAdminToken_ValidToken(t *testing.T) {
+	const secret = "supersecrettoken1234"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken(secret)(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	req.Header.Set("X-Admin-Token", secret)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestAdminToken_InvalidToken verifies that a request with a wrong
+// X-Admin-Token header receives 401 Unauthorized.
+func TestAdminToken_InvalidToken(t *testing.T) {
+	const secret = "supersecrettoken1234"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken(secret)(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	req.Header.Set("X-Admin-Token", "wrongtoken")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestAdminToken_MissingToken verifies that a request with no X-Admin-Token
+// header (when the server has a token configured) receives 401 Unauthorized.
+func TestAdminToken_MissingToken(t *testing.T) {
+	const secret = "supersecrettoken1234"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := AdminToken(secret)(handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/reset", http.NoBody)
+	// No X-Admin-Token header set.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestRateLimit_BucketEviction verifies that the rate-limiter does not panic
+// or OOM when a large number of unique source IPs make requests. It also
+// exercises the sweep path (reqCount % bucketSweepEvery == 0) by firing more
+// than bucketSweepEvery requests, and asserts that every response is either
+// 200 OK or 429 Too Many Requests — no other status codes or panics.
+func TestRateLimit_BucketEviction(t *testing.T) {
+	const totalRequests = 10_000
+
+	mw := RateLimit(10, 10)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := mw(next)
+
+	for i := 0; i < totalRequests; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		// Each request comes from a distinct source IP so the buckets map
+		// grows with every iteration, exercising the eviction sweep path.
+		req.RemoteAddr = fmt.Sprintf("10.%d.%d.%d:8080", (i>>16)&0xFF, (i>>8)&0xFF, i&0xFF)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		code := rec.Code
+		if code != http.StatusOK && code != http.StatusTooManyRequests {
+			t.Fatalf("request %d: unexpected status %d", i, code)
+		}
+	}
 }
 
 // errors / net / bufio imports used by the Hijack path. Kept here so

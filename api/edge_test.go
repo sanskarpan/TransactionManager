@@ -17,10 +17,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// edgeTestAdminToken is used by internal tests that need to call admin-gated
+// endpoints (/api/mvcc/vacuum, /api/reset, /api/scenarios/{name}/run).
+const edgeTestAdminToken = "edge-test-admin-token-32chars!"
+
 // newAPIServer mirrors the api_test.newTestServer helper but lives in
 // package api so fuzz targets and edge-case tests can use unexported
 // helpers without crossing the test-package boundary.
 func newAPIServer(t *testing.T) *Server {
+	t.Helper()
+	return newAPIServerWithConfig(t, ServerConfig{})
+}
+
+// newAPIServerWithConfig is like newAPIServer but lets callers inject a
+// ServerConfig (e.g. AdminToken for admin-gated endpoint tests).
+func newAPIServerWithConfig(t *testing.T, cfg ServerConfig) *Server {
 	t.Helper()
 	catalog := storage.NewCatalog()
 	storage.SeedCatalog(catalog)
@@ -44,9 +55,19 @@ func newAPIServer(t *testing.T) *Server {
 	vac.Run()
 	t.Cleanup(vac.Stop)
 	m := &metrics.Metrics{}
-	s := NewServerWithConfig(mgr, dd, wfg, dlHistory, vac, m, ServerConfig{})
+	s := NewServerWithConfig(mgr, dd, wfg, dlHistory, vac, m, cfg)
 	s.SetReadyForTest(true)
 	return s
+}
+
+// postAdmin sends a POST request with X-Admin-Token for admin-gated endpoints.
+func postAdmin(srv *Server, path, body, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Token", token)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	return w
 }
 
 func post(srv *Server, path, body string) *httptest.ResponseRecorder {
@@ -309,10 +330,11 @@ func TestEdge_LockByResourceNotFound(t *testing.T) {
 	assert.Empty(t, r["request"])
 }
 
-// TestEdge_Vacuum verifies the vacuum endpoint succeeds.
+// TestEdge_Vacuum verifies the vacuum endpoint succeeds when the correct
+// admin token is provided.
 func TestEdge_Vacuum(t *testing.T) {
-	srv := newAPIServer(t)
-	w := post(srv, "/api/mvcc/vacuum", `{}`)
+	srv := newAPIServerWithConfig(t, ServerConfig{AdminToken: edgeTestAdminToken})
+	w := postAdmin(srv, "/api/mvcc/vacuum", `{}`, edgeTestAdminToken)
 	require.Equal(t, http.StatusOK, w.Code)
 	var r map[string]interface{}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&r))

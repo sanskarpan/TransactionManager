@@ -29,12 +29,18 @@ func checkWriteConflictLocked(txnID TxnID, chain *VersionChain, snap SnapshotVie
 		if v.XMin == txnID {
 			continue // our own write
 		}
+		// Read both status bits atomically under a single lock to prevent a
+		// TOCTOU race: a PruneHistory call between a separate IsActive and
+		// IsCommitted check could evict the committed record, making
+		// IsCommitted return false for a txn that DID commit — a missed
+		// write-write conflict (lost update).
+		active, committed := mgr.TxnStatus(v.XMin)
 		// Is this writer still active?
-		if mgr.IsActive(v.XMin) {
+		if active {
 			return &WriteConflictError{ConflictingTxn: v.XMin}
 		}
 		// Was this writer active when we took our snapshot and has now committed?
-		if snap.ContainsID(v.XMin) && mgr.IsCommitted(v.XMin) {
+		if snap.ContainsID(v.XMin) && committed {
 			return &WriteConflictError{ConflictingTxn: v.XMin}
 		}
 	}

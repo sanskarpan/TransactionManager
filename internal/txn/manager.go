@@ -15,6 +15,10 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/types"
 )
 
+// ErrTooManyTransactions is returned by Manager.Begin when MaxActive is
+// set and the number of active transactions has reached that limit.
+var ErrTooManyTransactions = errors.New("too many active transactions")
+
 // Manager is the central orchestrator that owns every transaction's
 // lifecycle, hands out monotonic IDs, and bridges the two concurrency
 // protocols (2PL and MVCC) to the lock table, MVCC store, and SSI
@@ -26,6 +30,10 @@ type Manager struct {
 	committed map[ID]struct{}
 	aborted   map[ID]struct{}
 	nextID    atomic.Uint64
+
+	// MaxActive caps the number of concurrently-active transactions.
+	// Zero means no cap. Enforced atomically inside Begin under m.mu.
+	MaxActive int
 
 	// epochMu serialises opEpoch reads (from MVCC goroutines) and
 	// writes (from Reset). A separate mutex avoids the self-deadlock
@@ -58,11 +66,12 @@ type Manager struct {
 
 // WFGAdapter wraps the deadlock.WFG so the txn package can call into the
 // wait-for graph without importing the deadlock package (which would be a
-// cycle: deadlock → txn → deadlock). The adapter is just two function
+// cycle: deadlock → txn → deadlock). The adapter is just function
 // pointers; the real graph is wired by cmd/server at startup.
 type WFGAdapter struct {
-	AddEdgeFn    func(from, to uint64)
-	RemoveNodeFn func(txnID uint64)
+	AddEdgeFn     func(from, to uint64)
+	RemoveEdgesFn func(txnID uint64)
+	RemoveNodeFn  func(txnID uint64)
 }
 
 // AddEdge records that `from` is waiting for `to` to release a lock. No-op
@@ -78,8 +87,8 @@ func (w *WFGAdapter) AddEdge(from, to uint64) {
 // txn waits no more (granted or aborted) so the deadlock detector does not
 // see stale predecessors. No-op when no WFG is wired.
 func (w *WFGAdapter) RemoveEdges(txnID uint64) {
-	if w.RemoveNodeFn != nil {
-		w.RemoveNodeFn(txnID)
+	if w.RemoveEdgesFn != nil {
+		w.RemoveEdgesFn(txnID)
 	}
 }
 
@@ -117,15 +126,20 @@ func (m *Manager) nextTxnID() ID {
 // (for MVCC + non-ReadCommitted) takes a snapshot of the active set so
 // RR / Serializable reads see a consistent view. The lockTimeout defaults
 // to 5s when zero; the returned txn is active and ready for read/write.
+// If MaxActive is non-zero and the active count has reached that limit,
+// Begin returns ErrTooManyTransactions without allocating an ID.
 func (m *Manager) Begin(protocol ConcurrencyProtocol, isoLevel IsolationLevel, lockTimeout time.Duration) (*Transaction, error) {
 	if lockTimeout == 0 {
 		lockTimeout = 5 * time.Second
 	}
 
+	m.mu.Lock()
+	if m.MaxActive > 0 && len(m.txns) >= m.MaxActive {
+		m.mu.Unlock()
+		return nil, ErrTooManyTransactions
+	}
 	id := m.nextTxnID()
 	txn := NewTransaction(id, protocol, isoLevel, lockTimeout)
-
-	m.mu.Lock()
 	// Take MVCC snapshot if needed
 	if protocol == ProtocolMVCC && isoLevel != ReadCommitted {
 		txn.Snapshot = m.takeSnapshot()
@@ -534,11 +548,13 @@ func (m *Manager) PruneHistory() int {
 			removed++
 		}
 	}
-	// Cap: if either map is still above MaxHistoryRetained, drop the
-	// oldest entries. The cap is a hard memory bound; entries pruned here
-	// are the oldest (smallest IDs), and their version chains are
-	// expected to have been reaped already (vacuum removes versions whose
-	// deleter is below the horizon before ReapEmpty drops empty chains).
+	// Cap: if the committed map exceeds MaxHistoryRetained, drop the oldest
+	// entries. We intentionally do NOT cap-prune the aborted map: cap-pruning
+	// could remove abort records for IDs above the oldest-active horizon,
+	// causing IsAborted to return false for a genuinely aborted txn — and
+	// the committedBeforeSnapshot check in IsVisible would treat that txn's
+	// rolled-back writes as visible (dirty read). The normal horizon-based
+	// pruning above keeps the aborted map bounded in practice.
 	for excess := len(m.committed) - MaxHistoryRetained; excess > 0; excess-- {
 		var oldestID ID
 		var first = true
@@ -552,21 +568,6 @@ func (m *Manager) PruneHistory() int {
 			break
 		}
 		delete(m.committed, oldestID)
-		removed++
-	}
-	for excess := len(m.aborted) - MaxHistoryRetained; excess > 0; excess-- {
-		var oldestID ID
-		var first = true
-		for id := range m.aborted {
-			if first || id < oldestID {
-				oldestID = id
-				first = false
-			}
-		}
-		if first {
-			break
-		}
-		delete(m.aborted, oldestID)
 		removed++
 	}
 	return removed
@@ -630,6 +631,19 @@ func (m *Manager) IsActive(id ID) bool {
 	_, ok := m.txns[id]
 	m.mu.RUnlock()
 	return ok
+}
+
+// TxnStatus returns the active and committed status of id under a single lock,
+// preventing a race between separate IsActive/IsCommitted calls (e.g. a
+// concurrent PruneHistory evicting a committed record between them — a TOCTOU
+// that would cause IsCommitted to return false for a txn that DID commit,
+// yielding a missed write-write conflict / lost update).
+func (m *Manager) TxnStatus(id ID) (active, committed bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, active = m.txns[id]
+	_, committed = m.committed[id]
+	return
 }
 
 // GetTxn returns the active transaction for id, if present. Note that
@@ -734,6 +748,9 @@ type mvccStatusChecker struct{ m *Manager }
 func (c mvccStatusChecker) IsCommitted(id mvcc.TxnID) bool { return c.m.IsCommitted(ID(id)) }
 func (c mvccStatusChecker) IsAborted(id mvcc.TxnID) bool   { return c.m.IsAborted(ID(id)) }
 func (c mvccStatusChecker) IsActive(id mvcc.TxnID) bool    { return c.m.IsActive(ID(id)) }
+func (c mvccStatusChecker) TxnStatus(id mvcc.TxnID) (active, committed bool) {
+	return c.m.TxnStatus(ID(id))
+}
 
 // applyMVCCUndo undoes MVCC version chain changes for an aborted transaction.
 // For every written key, apply BOTH RemoveByXMin AND ClearXMax:
