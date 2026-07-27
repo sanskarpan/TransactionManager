@@ -278,13 +278,15 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 //
 // Both the storage layer and the API now refuse to admit a structurally
 // invalid row, so a buggy client cannot silently corrupt the catalog.
-func validateRowShape(tbl *storage.Table, values []types.Value) error {
-	if len(values) != len(tbl.Columns) {
+func validateRowShape(tbl storage.TableIface, values []types.Value) error {
+	cols := tbl.TableColumns()
+	name := tbl.TableName()
+	if len(values) != len(cols) {
 		return types.NewRowShapeError(
-			fmt.Sprintf("table %q has %d columns, got %d values", tbl.Name, len(tbl.Columns), len(values)),
+			fmt.Sprintf("table %q has %d columns, got %d values", name, len(cols), len(values)),
 		)
 	}
-	for i, col := range tbl.Columns {
+	for i, col := range cols {
 		v := values[i]
 		if v.Type != col.Type {
 			return types.NewRowShapeError(

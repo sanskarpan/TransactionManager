@@ -17,4 +17,5 @@ type Version struct {
 	Cmin      int // command counter within XMin
 	CreatedAt time.Time
 	Prev      *Version // older version (singly linked, head = newest)
+	LSN       uint64   // WAL LSN of the Write record that created this version (0 if no WAL)
 }

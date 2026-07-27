@@ -16,6 +16,7 @@ import (
 
 	"github.com/sanskarpan/TransactionManager/internal/lock"
 	"github.com/sanskarpan/TransactionManager/internal/storage"
+	"github.com/sanskarpan/TransactionManager/internal/wal"
 )
 
 // Status is the lifecycle state of a transaction. Stored atomically so it
@@ -106,6 +107,9 @@ type Transaction struct {
 	InConflict  bool
 	OutConflict bool
 	SIReadKeys  map[storage.RowKey]struct{}
+
+	// LastWALLSN is the last WAL LSN written for this transaction (for PrevLSN chain).
+	LastWALLSN wal.LSN
 
 	// Lifecycle observability.
 	BeginAt time.Time

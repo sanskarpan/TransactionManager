@@ -111,3 +111,9 @@ func (t *Table) Count() int {
 	defer t.mu.RUnlock()
 	return len(t.rows)
 }
+
+// TableName returns the name of the table. Satisfies TableIface.
+func (t *Table) TableName() string { return t.Name }
+
+// TableColumns returns the column schema of the table. Satisfies TableIface.
+func (t *Table) TableColumns() []Column { return t.Columns }

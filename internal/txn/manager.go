@@ -14,6 +14,7 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/mvcc"
 	"github.com/sanskarpan/TransactionManager/internal/storage"
 	"github.com/sanskarpan/TransactionManager/internal/types"
+	"github.com/sanskarpan/TransactionManager/internal/wal"
 )
 
 // ErrTooManyTransactions is returned by Manager.Begin when MaxActive is
@@ -51,6 +52,7 @@ type Manager struct {
 	WFG        *WFGAdapter
 	MVCCStore  *mvcc.Store
 	SSITracker *isolation.SSITracker
+	WAL        wal.WALWriter
 
 	// Events (optional - set after creation)
 	OnBegin  func(txn *Transaction)
@@ -147,6 +149,12 @@ func (m *Manager) Begin(protocol ConcurrencyProtocol, isoLevel IsolationLevel, l
 	}
 	m.txns[id] = txn
 	m.mu.Unlock()
+
+	if m.WAL != nil {
+		if lsn, err := m.WAL.Begin(uint64(txn.ID)); err == nil {
+			txn.LastWALLSN = lsn
+		}
+	}
 
 	if m.OnBegin != nil {
 		m.OnBegin(txn)
@@ -252,6 +260,18 @@ func (m *Manager) Commit(txnID ID) error {
 		}
 	}
 
+	// WAL: write COMMIT record and flush before releasing locks or acknowledging
+	// success. If the flush fails we return an error and leave the txn active
+	// so the caller can retry or abort.
+	if m.WAL != nil {
+		if lsn, walErr := m.WAL.Commit(uint64(txnID), txn.LastWALLSN); walErr == nil {
+			if flushErr := m.WAL.Flush(lsn); flushErr != nil {
+				m.mu.Unlock()
+				return flushErr
+			}
+		}
+	}
+
 	txn.setStatus(TxnCommitted)
 	delete(m.txns, txnID)
 	m.committed[txnID] = struct{}{}
@@ -321,6 +341,11 @@ func (m *Manager) Abort(txnID ID, reason error) error {
 	// MVCC: undo version chain changes
 	if txn.Protocol == ProtocolMVCC {
 		m.applyMVCCUndo(txn)
+	}
+
+	// WAL: write ABORT record after undo is complete
+	if m.WAL != nil {
+		_, _ = m.WAL.Abort(uint64(txnID), txn.LastWALLSN)
 	}
 
 	// Cleanup SSI tracker
@@ -938,6 +963,16 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 			Data:      values,
 			CreatedAt: time.Now(),
 		}
+		if m.WAL != nil {
+			var afterBytes []byte
+			if values != nil {
+				afterBytes = types.EncodeValues(values)
+			}
+			if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, nil, afterBytes); walErr == nil {
+				txn.LastWALLSN = lsn
+				newVer.LSN = lsn
+			}
+		}
 		chain.PrependUnsafe(newVer)
 		txn.UndoLog.Append(UndoInsert, table, storage.RowKey(key), nil)
 
@@ -969,6 +1004,17 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 			Data:      values,
 			CreatedAt: time.Now(),
 		}
+		if m.WAL != nil {
+			var beforeBytes, afterBytes []byte
+			beforeBytes = types.EncodeValues(visible.Data)
+			if values != nil {
+				afterBytes = types.EncodeValues(values)
+			}
+			if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, beforeBytes, afterBytes); walErr == nil {
+				txn.LastWALLSN = lsn
+				newVer.LSN = lsn
+			}
+		}
 		chain.PrependUnsafe(newVer)
 
 	case UndoDelete:
@@ -984,6 +1030,12 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 			return types.NewRowNotFoundError()
 		}
 		txn.UndoLog.Append(UndoDelete, table, storage.RowKey(key), visible.Data)
+		if m.WAL != nil {
+			beforeBytes := types.EncodeValues(visible.Data)
+			if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, beforeBytes, nil); walErr == nil {
+				txn.LastWALLSN = lsn
+			}
+		}
 		visible.XMax = uint64(txn.ID)
 	}
 
@@ -1090,6 +1142,17 @@ func (m *Manager) TwoPLWrite(txn *Transaction, table, key string, values []types
 
 	before, _ := t.GetRow(storage.RowKey(key))
 	txn.UndoLog.Append(op, table, storage.RowKey(key), before)
+
+	if m.WAL != nil {
+		var beforeBytes, afterBytes []byte
+		beforeBytes = types.EncodeValues(before)
+		if values != nil {
+			afterBytes = types.EncodeValues(values)
+		}
+		if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, beforeBytes, afterBytes); walErr == nil {
+			txn.LastWALLSN = lsn
+		}
+	}
 
 	switch op {
 	case UndoInsert, UndoUpdate:

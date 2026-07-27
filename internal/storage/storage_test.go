@@ -57,11 +57,11 @@ func TestCatalog_RegisterAndLookup(t *testing.T) {
 
 	got, ok := catalog.Lookup("t1")
 	require.True(t, ok)
-	assert.Equal(t, "t1", got.Name)
+	assert.Equal(t, "t1", got.TableName())
 
 	got, ok = catalog.Lookup("t2")
 	require.True(t, ok)
-	assert.Equal(t, "t2", got.Name)
+	assert.Equal(t, "t2", got.TableName())
 
 	_, ok = catalog.Lookup("nonexistent")
 	assert.False(t, ok)
