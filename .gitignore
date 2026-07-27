@@ -43,3 +43,4 @@ pnpm-debug.log*
 tmp/
 temp/
 .worktrees/
+site/

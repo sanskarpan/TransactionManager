@@ -1,0 +1,79 @@
+site_name: Transaction Manager
+site_description: >-
+  An in-memory transaction manager implementing strict 2PL, MVCC, SSI and
+  deadlock detection — with a full HTTP API and React exploration UI.
+site_author: sanskarpan
+repo_url: https://github.com/sanskarpan/TransactionManager
+repo_name: sanskarpan/TransactionManager
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+validation:
+  nav:
+    omitted_files: info
+    not_found: warn
+  links:
+    not_found: ignore
+    anchors: ignore
+    absolute_links: ignore
+    unrecognized_links: ignore
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - scheme: default
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.details
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Quick Start: quickstart.md
+  - Architecture:
+      - System Overview: architecture/overview.md
+      - Two-Phase Locking (2PL): architecture/2pl.md
+      - MVCC: architecture/mvcc.md
+      - Serializable Snapshot Isolation: architecture/ssi.md
+      - Deadlock Detection: architecture/deadlock.md
+  - API Reference: api-reference.md
+  - Anomaly Scenarios: scenarios.md
+  - Operations: RUNBOOK.md
+  - Design Decisions:
+      - ADR Index: adr/README.md
+      - ADR-0001 Two protocols: adr/0001-two-protocols.md
+      - ADR-0002 Strict 2PL & intention locks: adr/0002-strict-2pl-intention-locks.md
+      - ADR-0003 Deadlock resolution: adr/0003-deadlock-resolution.md
+      - ADR-0004 MVCC visibility: adr/0004-mvcc-visibility.md
+      - ADR-0005 SSI serializable: adr/0005-ssi-serializable.md
+      - ADR-0006 Gap locking: adr/0006-gap-locking.md
+      - ADR-0007 Admin token: adr/0007-admin-token.md
