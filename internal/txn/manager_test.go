@@ -10,6 +10,7 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/mvcc"
 	"github.com/sanskarpan/TransactionManager/internal/storage"
 	"github.com/sanskarpan/TransactionManager/internal/types"
+	"github.com/sanskarpan/TransactionManager/internal/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -344,4 +345,81 @@ func TestBegin_ConcurrentCapEnforcement(t *testing.T) {
 	// Confirm the live active count also never exceeded the cap.
 	assert.LessOrEqual(t, mgr.ActiveCount(), maxActive,
 		"ActiveCount must not exceed MaxActive after all goroutines complete")
+}
+
+// TestCLR_UndoNextLSN_ProductionPath verifies that the production abort path
+// (Manager.Abort → applyUndoEntries → WAL.CLR) writes CLRs with correct
+// ARIES-standard undoNextLSN values.
+//
+// ARIES requires CLR.undoNextLSN to point to the record *before* the one
+// being compensated (i.e. the next record to undo), NOT the record being
+// compensated itself. Passing the compensated record's own LSN as undoNextLSN
+// would cause recovery to re-undo an already-compensated record.
+//
+// Scenario: txn writes W1 then W2. Abort processes W2 first (reverse order):
+//   - CLR_W2.undoNextLSN must == W1's LSN (next record to undo)
+//   - CLR_W1.undoNextLSN must == LSNInvalid/0 (no more records to undo)
+func TestCLR_UndoNextLSN_ProductionPath(t *testing.T) {
+	dir := t.TempDir()
+
+	walMgr, err := wal.OpenManager(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, walMgr.Close()) })
+
+	// Build a manager with a real WAL.
+	catalog := storage.NewCatalog()
+	table := storage.NewTable("accounts", []storage.Column{
+		{Name: "balance", Type: types.TypeFloat},
+	})
+	catalog.Register(table)
+	table.PutRow("row1", []types.Value{types.FloatVal(100.0)})
+	table.PutRow("row2", []types.Value{types.FloatVal(200.0)})
+
+	mgr := NewManager(catalog)
+	mgr.WAL = walMgr
+
+	// Begin a 2PL txn and do two writes so the undo log has two entries.
+	txn, err := mgr.Begin(Protocol2PL, ReadCommitted, 5*time.Second)
+	require.NoError(t, err)
+
+	err = mgr.TwoPLWrite(txn, "accounts", "row1", []types.Value{types.FloatVal(111.0)}, UndoUpdate)
+	require.NoError(t, err)
+	lsnW1 := txn.LastWALLSN // LSN of the first write record
+
+	err = mgr.TwoPLWrite(txn, "accounts", "row2", []types.Value{types.FloatVal(222.0)}, UndoUpdate)
+	require.NoError(t, err)
+	lsnW2 := txn.LastWALLSN // LSN of the second write record
+
+	// Abort: should write two CLRs in reverse order (CLR_W2 first, CLR_W1 second).
+	err = mgr.Abort(txn.ID, nil)
+	require.NoError(t, err)
+
+	// Flush and iterate to collect all CLR records for this txn.
+	require.NoError(t, walMgr.Flush(walMgr.FlushedLSN()))
+
+	type clrInfo struct {
+		prevLSN     wal.LSN
+		undoNextLSN wal.LSN
+	}
+	var clrs []clrInfo
+	txnIDU64 := uint64(txn.ID)
+	err = walMgr.Iterate(1, func(rec wal.LogRecord) bool {
+		if rec.Type == wal.RecordCLR && rec.TxnID == txnIDU64 {
+			clrs = append(clrs, clrInfo{rec.PrevLSN, rec.UndoNextLSN})
+		}
+		return true
+	})
+	require.NoError(t, err)
+
+	require.Len(t, clrs, 2, "expected exactly 2 CLRs (one per write)")
+
+	// First CLR compensates W2 (processed first in reverse order):
+	//   prevLSN     = lsnW2 (the write record being compensated)
+	//   undoNextLSN = lsnW1 (the next record to undo)
+	assert.Equal(t, lsnW2, clrs[0].prevLSN, "CLR_W2.prevLSN must == lsnW2")
+	assert.Equal(t, lsnW1, clrs[0].undoNextLSN, "CLR_W2.undoNextLSN must == lsnW1 (next to undo)")
+
+	// Second CLR compensates W1 (last entry, no more records to undo):
+	//   undoNextLSN = LSNInvalid/0
+	assert.Equal(t, wal.LSNInvalid, clrs[1].undoNextLSN, "CLR_W1.undoNextLSN must be LSNInvalid (no more to undo)")
 }

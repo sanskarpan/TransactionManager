@@ -107,3 +107,113 @@ func TestWAL_EmptyLogRecovery(t *testing.T) {
 			len(rec.Committed), len(rec.UndoTxns), len(rec.RedoOps))
 	}
 }
+
+// TestWAL_CLR_MidAbortRecovery simulates a crash that occurs in the middle of
+// an abort (after one CLR has been written but before the ABORT record).
+// ARIES recovery must recognise that the txn is still in the undo set and
+// that the CLR's UndoNextLSN correctly identifies the next record to undo.
+func TestWAL_CLR_MidAbortRecovery(t *testing.T) {
+	const txnID = uint64(7)
+	dir := t.TempDir()
+
+	// Phase 1: write two rows, then write one CLR (simulating partial abort of
+	// the second write), then crash before the ABORT record is written.
+	var lsnWriteA, lsnWriteB, clrLSN wal.LSN
+	func() {
+		mgr, err := wal.OpenManager(dir)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		defer mgr.Close()
+
+		beginLSN, err := mgr.Begin(txnID)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+
+		// Write row "a"
+		lsnWriteA, err = mgr.Write(txnID, beginLSN, 0, "accounts", "row-a", nil, []byte("val-a"))
+		if err != nil {
+			t.Fatalf("write row-a: %v", err)
+		}
+
+		// Write row "b"
+		lsnWriteB, err = mgr.Write(txnID, lsnWriteA, 0, "accounts", "row-b", nil, []byte("val-b"))
+		if err != nil {
+			t.Fatalf("write row-b: %v", err)
+		}
+
+		// Write CLR compensating row "b" (the last write). The CLR's prevLSN is
+		// lsnWriteB (the record being compensated) and undoNextLSN is lsnWriteA
+		// (the next record to undo after this compensation).
+		clrLSN, err = mgr.CLR(txnID, lsnWriteB, lsnWriteA)
+		if err != nil {
+			t.Fatalf("CLR: %v", err)
+		}
+
+		// Flush so the CLR reaches disk before the simulated crash.
+		if err := mgr.Flush(clrLSN); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+
+		// Crash here: no ABORT record written.
+	}()
+
+	// Phase 2: run ARIES recovery.
+	rec, err := wal.RunRecovery(dir)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+
+	// The txn must appear in UndoTxns because no ABORT record was written.
+	undoLSN, inUndo := rec.UndoTxns[txnID]
+	if !inUndo {
+		t.Fatalf("txn %d must be in UndoTxns after mid-abort crash", txnID)
+	}
+	// The analysis pass tracks lastLSN; after the CLR the lastLSN should be
+	// the CLR's own LSN.
+	if undoLSN != clrLSN {
+		t.Errorf("UndoTxns[%d] = %d, want CLR LSN %d", txnID, undoLSN, clrLSN)
+	}
+	// The txn must NOT appear in Committed or Aborted.
+	if _, committed := rec.Committed[txnID]; committed {
+		t.Error("mid-abort txn must NOT be in Committed")
+	}
+	if _, aborted := rec.Aborted[txnID]; aborted {
+		t.Error("mid-abort txn must NOT be in Aborted (no ABORT record was written)")
+	}
+
+	// Phase 3: re-open the WAL and iterate to verify the CLR record carries the
+	// correct UndoNextLSN (the LSN of the next write record to undo).
+	mgr2, err := wal.OpenManager(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer mgr2.Close()
+
+	var foundCLR bool
+	if err := mgr2.Iterate(1, func(rec wal.LogRecord) bool {
+		if rec.Type == wal.RecordCLR && rec.TxnID == txnID {
+			foundCLR = true
+			if rec.UndoNextLSN != lsnWriteA {
+				t.Errorf("CLR.UndoNextLSN = %d, want lsnWriteA=%d", rec.UndoNextLSN, lsnWriteA)
+			}
+			// The write record that was compensated (lsnWriteB) should appear
+			// as the CLR's PrevLSN.
+			if rec.PrevLSN != lsnWriteB {
+				t.Errorf("CLR.PrevLSN = %d, want lsnWriteB=%d", rec.PrevLSN, lsnWriteB)
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	if !foundCLR {
+		t.Error("no CLR record found in the WAL")
+	}
+
+	// lsnWriteA and lsnWriteB are captured only to verify CLR fields; suppress
+	// any unused-variable warnings by referencing them here.
+	_ = lsnWriteA
+	_ = lsnWriteB
+}

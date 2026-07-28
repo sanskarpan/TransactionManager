@@ -26,6 +26,10 @@ type UndoEntry struct {
 	Key         storage.RowKey
 	BeforeImage []types.Value
 	SavepointID int
+	// WALWriteLSN is the LSN of the WAL.Write() record that logged this
+	// operation. Zero means no WAL record was written (e.g. WAL disabled).
+	// Used to write CLR records during abort (ARIES).
+	WALWriteLSN uint64
 }
 
 // UndoLog is a thread-safe, append-only log of undo entries for a transaction.
@@ -44,6 +48,15 @@ func (u *UndoLog) Append(op UndoOpType, table string, key storage.RowKey, before
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.entries = append(u.entries, UndoEntry{Op: op, Table: table, Key: key, BeforeImage: before})
+}
+
+// AppendWithLSN records a new undo entry and associates it with the WAL LSN
+// of the log record that captured the write. walLSN should be the value
+// returned by WAL.Write(); pass 0 when WAL is disabled.
+func (u *UndoLog) AppendWithLSN(op UndoOpType, table string, key storage.RowKey, before []types.Value, walLSN uint64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.entries = append(u.entries, UndoEntry{Op: op, Table: table, Key: key, BeforeImage: before, WALWriteLSN: walLSN})
 }
 
 // Len returns the number of entries in the undo log.

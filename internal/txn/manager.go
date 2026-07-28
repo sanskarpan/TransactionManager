@@ -125,6 +125,14 @@ func (m *Manager) nextTxnID() ID {
 	return ID(m.nextID.Add(1))
 }
 
+// AllocateTxnID atomically allocates and returns the next transaction ID
+// without creating a transaction. Used by the Raft leader to assign a
+// deterministic ID before proposing CmdBegin; followers re-use the same ID
+// via BeginWithID so all nodes converge on the same transaction set.
+func (m *Manager) AllocateTxnID() ID {
+	return m.nextTxnID()
+}
+
 // Begin starts a new transaction, assigns it the next monotonic ID, and
 // (for MVCC + non-ReadCommitted) takes a snapshot of the active set so
 // RR / Serializable reads see a consistent view. The lockTimeout defaults
@@ -332,9 +340,10 @@ func (m *Manager) Abort(txnID ID, reason error) error {
 	// deadlock detector). sync.Once guards the close.
 	txn.closeAbort()
 
-	// 2PL: apply undo log, release locks
+	// 2PL: apply undo log (writes CLRs for each compensated record), release locks
+	var lastCLRLSN wal.LSN
 	if txn.Protocol == Protocol2PL {
-		m.applyUndoLog(txn)
+		lastCLRLSN = m.applyUndoLog(txn)
 		m.LockAcq.ReleaseAllLocks(uint64(txn.ID), txn.LocksHeld)
 	}
 
@@ -343,9 +352,15 @@ func (m *Manager) Abort(txnID ID, reason error) error {
 		m.applyMVCCUndo(txn)
 	}
 
-	// WAL: write ABORT record after undo is complete
+	// WAL: write ABORT record after undo is complete. Use the last CLR LSN as
+	// prevLSN so the abort record is chained correctly; fall back to the last
+	// write LSN if no CLRs were written (MVCC path or WAL-less 2PL).
 	if m.WAL != nil {
-		_, _ = m.WAL.Abort(uint64(txnID), txn.LastWALLSN)
+		abortPrevLSN := txn.LastWALLSN
+		if lastCLRLSN != wal.LSNInvalid {
+			abortPrevLSN = lastCLRLSN
+		}
+		_, _ = m.WAL.Abort(uint64(txnID), abortPrevLSN)
 	}
 
 	// Cleanup SSI tracker
@@ -362,9 +377,47 @@ func (m *Manager) Abort(txnID ID, reason error) error {
 // applyUndoEntries restores before-images for the supplied undo entries,
 // applied in reverse order. Used by applyUndoLog (full abort) and
 // RollbackToSavepoint (partial rollback) to avoid duplicating the switch.
-func (m *Manager) applyUndoEntries(entries []UndoEntry) {
+// When txnID is non-zero and m.WAL is set, a CLR record is written to the WAL
+// before each compensating action (ARIES). The LSN of the last CLR written is
+// returned; 0 means no CLRs were written (WAL absent or no entries).
+func (m *Manager) applyUndoEntries(entries []UndoEntry, txnID uint64) wal.LSN {
+	var lastCLRLSN wal.LSN
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
+
+		// Write a CLR before applying the compensating action so that a crash
+		// mid-undo leaves a trail that recovery can follow (ARIES §4.2).
+		//
+		// ARIES CLR semantics (Mohan et al. §4.2):
+		//   - CLR.prevLSN   = LSN of the last record written for this txn
+		//                     (the compensated write record, or the previous CLR)
+		//   - CLR.undoNextLSN = LSN of the record that comes BEFORE the one
+		//                       being compensated in the undo chain, i.e. the
+		//                       next record to undo after this CLR. This is
+		//                       entries[i-1].WALWriteLSN, or LSNInvalid (0) if
+		//                       i==0 (no more records to undo).
+		//
+		// prevLSN chains CLRs together (and connects the first CLR back to the
+		// last write); undoNextLSN lets recovery skip already-compensated
+		// records and jump directly to the next record that still needs undoing.
+		if m.WAL != nil && txnID != 0 && e.WALWriteLSN != wal.LSNInvalid {
+			// prevLSN: for the first CLR, point at the compensated write record;
+			// for subsequent CLRs, point at the previous CLR.
+			clrPrevLSN := lastCLRLSN
+			if clrPrevLSN == wal.LSNInvalid {
+				clrPrevLSN = e.WALWriteLSN
+			}
+			// undoNextLSN: the LSN of the record to undo NEXT (the entry before
+			// this one in the original write order, since we process in reverse).
+			var undoNextLSN wal.LSN // LSNInvalid (0) means no more records to undo
+			if i > 0 {
+				undoNextLSN = entries[i-1].WALWriteLSN
+			}
+			if clrLSN, clrErr := m.WAL.CLR(txnID, clrPrevLSN, undoNextLSN); clrErr == nil {
+				lastCLRLSN = clrLSN
+			}
+		}
+
 		table, ok := m.Catalog.Lookup(e.Table)
 		if !ok {
 			continue
@@ -378,11 +431,13 @@ func (m *Manager) applyUndoEntries(entries []UndoEntry) {
 			}
 		}
 	}
+	return lastCLRLSN
 }
 
 // applyUndoLog restores all before-images in the catalog for a 2PL abort.
-func (m *Manager) applyUndoLog(txn *Transaction) {
-	m.applyUndoEntries(txn.UndoLog.All())
+// Returns the LSN of the last CLR written (0 if WAL is disabled).
+func (m *Manager) applyUndoLog(txn *Transaction) wal.LSN {
+	return m.applyUndoEntries(txn.UndoLog.All(), uint64(txn.ID))
 }
 
 // CreateSavepoint saves a named savepoint
@@ -435,7 +490,7 @@ func (m *Manager) RollbackToSavepoint(txnID ID, name string) error {
 	// so only 2PL needs the catalog restoration.
 	entries := txn.UndoLog.EntriesFrom(sp.UndoPosition)
 	if txn.Protocol == Protocol2PL {
-		m.applyUndoEntries(entries)
+		m.applyUndoEntries(entries, uint64(txnID))
 	}
 	txn.UndoLog.TruncateTo(sp.UndoPosition)
 	return nil
@@ -971,6 +1026,7 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 			Data:      values,
 			CreatedAt: time.Now(),
 		}
+		var insertWriteLSN wal.LSN
 		if m.WAL != nil {
 			var afterBytes []byte
 			if values != nil {
@@ -979,10 +1035,11 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 			if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, nil, afterBytes); walErr == nil {
 				txn.LastWALLSN = lsn
 				newVer.LSN = lsn
+				insertWriteLSN = lsn
 			}
 		}
 		chain.PrependUnsafe(newVer)
-		txn.UndoLog.Append(UndoInsert, table, storage.RowKey(key), nil)
+		txn.UndoLog.AppendWithLSN(UndoInsert, table, storage.RowKey(key), nil, insertWriteLSN)
 
 	case UndoUpdate:
 		// Find the currently visible version to supersede
@@ -997,7 +1054,6 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 		if visible == nil {
 			return types.NewRowNotFoundError()
 		}
-		txn.UndoLog.Append(UndoUpdate, table, storage.RowKey(key), visible.Data)
 		visible.XMax = uint64(txn.ID)
 		// Prepend the new version at the chain head. PrependUnsafe sets
 		// newVer.Prev = current head and re-heads the chain. This preserves
@@ -1012,6 +1068,7 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 			Data:      values,
 			CreatedAt: time.Now(),
 		}
+		var updateWriteLSN wal.LSN
 		if m.WAL != nil {
 			var beforeBytes, afterBytes []byte
 			beforeBytes = types.EncodeValues(visible.Data)
@@ -1021,8 +1078,10 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 			if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, beforeBytes, afterBytes); walErr == nil {
 				txn.LastWALLSN = lsn
 				newVer.LSN = lsn
+				updateWriteLSN = lsn
 			}
 		}
+		txn.UndoLog.AppendWithLSN(UndoUpdate, table, storage.RowKey(key), visible.Data, updateWriteLSN)
 		chain.PrependUnsafe(newVer)
 
 	case UndoDelete:
@@ -1037,13 +1096,15 @@ func (m *Manager) MVCCWrite(txn *Transaction, table, key string, values []types.
 		if visible == nil {
 			return types.NewRowNotFoundError()
 		}
-		txn.UndoLog.Append(UndoDelete, table, storage.RowKey(key), visible.Data)
+		var deleteWriteLSN wal.LSN
 		if m.WAL != nil {
 			beforeBytes := types.EncodeValues(visible.Data)
 			if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, beforeBytes, nil); walErr == nil {
 				txn.LastWALLSN = lsn
+				deleteWriteLSN = lsn
 			}
 		}
+		txn.UndoLog.AppendWithLSN(UndoDelete, table, storage.RowKey(key), visible.Data, deleteWriteLSN)
 		visible.XMax = uint64(txn.ID)
 	}
 
@@ -1149,8 +1210,8 @@ func (m *Manager) TwoPLWrite(txn *Transaction, table, key string, values []types
 	}
 
 	before, _ := t.GetRow(storage.RowKey(key))
-	txn.UndoLog.Append(op, table, storage.RowKey(key), before)
 
+	var writeLSN wal.LSN
 	if m.WAL != nil {
 		var beforeBytes, afterBytes []byte
 		beforeBytes = types.EncodeValues(before)
@@ -1159,8 +1220,10 @@ func (m *Manager) TwoPLWrite(txn *Transaction, table, key string, values []types
 		}
 		if lsn, walErr := m.WAL.Write(uint64(txn.ID), txn.LastWALLSN, uint8(op), table, key, beforeBytes, afterBytes); walErr == nil {
 			txn.LastWALLSN = lsn
+			writeLSN = lsn
 		}
 	}
+	txn.UndoLog.AppendWithLSN(op, table, storage.RowKey(key), before, writeLSN)
 
 	switch op {
 	case UndoInsert, UndoUpdate:
