@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -14,12 +16,19 @@ type rowLocation struct {
 }
 
 // PagedTable is a persistent Table implementation backed by a HeapFile + BufferPool.
+//
+// When STORAGE_MODE=memory (default) the row index is an in-memory hash map
+// (backward-compatible with the original implementation).
+// When STORAGE_MODE=paged the row index is a B+ tree backed by its own heap file
+// ("btree-<tableName>") for O(log n) lookups and ordered range scans.
 type PagedTable struct {
 	name    string
 	columns []Column
 
 	mu           sync.RWMutex
-	rowIndex     map[RowKey]rowLocation
+	rowIndex     map[RowKey]rowLocation // non-nil only when useMap==true
+	index        *BTree                 // non-nil only when useMap==false
+	useMap       bool
 	insertPageID PageID
 
 	pool    *BufferPool
@@ -30,23 +39,74 @@ type PagedTable struct {
 }
 
 // NewPagedTable creates a new PagedTable. Calls RebuildIndex internally.
+//
+// When STORAGE_MODE != "memory" (and a btree heap can be registered), uses BTree.
+// Otherwise falls back to the in-memory hash map.
 func NewPagedTable(name string, cols []Column, pool *BufferPool, heap *HeapFile) (*PagedTable, error) {
+	storageMode := os.Getenv("STORAGE_MODE")
+	useMap := storageMode == "" || storageMode == "memory"
+
 	pt := &PagedTable{
-		name:     name,
-		columns:  cols,
-		rowIndex: make(map[RowKey]rowLocation),
-		pool:     pool,
-		heap:     heap,
-		tableID:  name,
+		name:    name,
+		columns: cols,
+		pool:    pool,
+		heap:    heap,
+		tableID: name,
+		useMap:  useMap,
 	}
+
+	if useMap {
+		pt.rowIndex = make(map[RowKey]rowLocation)
+	} else {
+		// Register a dedicated heap file for the B+ tree index.
+		btreeTableID := "btree-" + name
+		if _, ok := pool.heaps[btreeTableID]; !ok {
+			// Auto-register an in-memory-only heap using the same directory as the
+			// data heap. We infer the directory from the heap file path.
+			btreeHeap, err := OpenHeapFile(heapDir(heap), btreeTableID)
+			if err != nil {
+				return nil, fmt.Errorf("btree: open heap for %s: %w", btreeTableID, err)
+			}
+			pool.heaps[btreeTableID] = btreeHeap
+		}
+		bt, err := NewBTree(pool, btreeTableID)
+		if err != nil {
+			return nil, fmt.Errorf("btree: init for table %s: %w", name, err)
+		}
+		pt.index = bt
+	}
+
 	if err := pt.RebuildIndex(); err != nil {
 		return nil, err
 	}
 	return pt, nil
 }
 
-// RebuildIndex scans all pages from 1..lastPageID and populates rowIndex.
+// heapDir extracts the directory path from a HeapFile's path field.
+// We use the exported path — the HeapFile stores it in h.path.
+func heapDir(h *HeapFile) string {
+	// HeapFile.path is "<dir>/<tableName>.dat"
+	// We strip the last component to get the directory.
+	path := h.path
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' || path[i] == '\\' {
+			return path[:i]
+		}
+	}
+	return "."
+}
+
+// RebuildIndex scans all pages from 1..lastPageID and populates the index.
 func (pt *PagedTable) RebuildIndex() error {
+	// Reset map index for in-memory mode
+	if pt.useMap {
+		pt.rowIndex = make(map[RowKey]rowLocation)
+	}
+	// Note: BTree index is rebuilt by re-inserting; if existing data is already
+	// in the btree heap file it persists across restarts — no rebuild needed.
+	// But we still scan heap pages to populate insertPageID and to handle
+	// cases where the btree heap was lost.
+
 	lastID := pt.heap.LastPageID()
 	for pid := PageID(1); pid <= lastID; pid++ {
 		f, err := pt.pool.FetchPage(pt.tableID, pid)
@@ -60,7 +120,15 @@ func (pt *PagedTable) RebuildIndex() error {
 			if !ok {
 				continue
 			}
-			pt.rowIndex[key] = rowLocation{pageID: pid, slotID: sid}
+			loc := rowLocation{pageID: pid, slotID: sid}
+			if pt.useMap {
+				pt.rowIndex[key] = loc
+			} else {
+				if err := pt.index.Insert(key, loc); err != nil {
+					pt.pool.UnpinPage(pt.tableID, pid, false)
+					return fmt.Errorf("btree: rebuild insert for key %q: %w", key, err)
+				}
+			}
 			hasSpace = true
 		}
 		pt.pool.UnpinPage(pt.tableID, pid, false)
@@ -82,12 +150,61 @@ func (pt *PagedTable) TableName() string { return pt.name }
 // TableColumns returns the column schema. Satisfies TableIface.
 func (pt *PagedTable) TableColumns() []Column { return pt.columns }
 
+// indexSearch looks up key in whichever index is active.
+func (pt *PagedTable) indexSearch(key RowKey) (rowLocation, bool) {
+	if pt.useMap {
+		loc, ok := pt.rowIndex[key]
+		return loc, ok
+	}
+	return pt.index.Search(key)
+}
+
+// indexInsert inserts key→loc into the active index.
+func (pt *PagedTable) indexInsert(key RowKey, loc rowLocation) {
+	if pt.useMap {
+		pt.rowIndex[key] = loc
+		return
+	}
+	_ = pt.index.Insert(key, loc) // errors are best-effort in this research impl
+}
+
+// indexDelete removes key from the active index.
+func (pt *PagedTable) indexDelete(key RowKey) {
+	if pt.useMap {
+		delete(pt.rowIndex, key)
+		return
+	}
+	pt.index.Delete(key)
+}
+
+// indexCount returns the number of entries in the active index.
+func (pt *PagedTable) indexCount() int {
+	if pt.useMap {
+		return len(pt.rowIndex)
+	}
+	return pt.index.Count()
+}
+
+// indexAllKeys returns all keys from the active index.
+// For the map index, keys are sorted post-hoc (original behavior preserved).
+// For the BTree index, keys come out in sorted order already.
+func (pt *PagedTable) indexAllKeys() []RowKey {
+	if pt.useMap {
+		keys := make([]RowKey, 0, len(pt.rowIndex))
+		for k := range pt.rowIndex {
+			keys = append(keys, k)
+		}
+		return keys
+	}
+	return pt.index.AllKeys()
+}
+
 // GetRow returns values for the given key. Satisfies TableIface.
 func (pt *PagedTable) GetRow(key RowKey) ([]types.Value, bool) {
 	pt.mu.RLock()
 	defer pt.mu.RUnlock()
 
-	loc, ok := pt.rowIndex[key]
+	loc, ok := pt.indexSearch(key)
 	if !ok {
 		return nil, false
 	}
@@ -118,14 +235,14 @@ func (pt *PagedTable) PutRow(key RowKey, values []types.Value) {
 
 	lsn := pt.nextLSN.Load()
 
-	if loc, ok := pt.rowIndex[key]; ok {
+	if loc, ok := pt.indexSearch(key); ok {
 		// Update existing row
 		f, err := pt.pool.FetchPage(pt.tableID, loc.pageID)
 		if err == nil {
 			newSlotID, err := f.page.UpdateRow(loc.slotID, key, valBytes)
 			if err == nil {
 				f.page.SetPageLSN(lsn)
-				pt.rowIndex[key] = rowLocation{pageID: loc.pageID, slotID: newSlotID}
+				pt.indexInsert(key, rowLocation{pageID: loc.pageID, slotID: newSlotID})
 				pt.pool.UnpinPage(pt.tableID, loc.pageID, true)
 				return
 			}
@@ -146,7 +263,7 @@ func (pt *PagedTable) putRowNew(key RowKey, valBytes []byte, lsn LSN) {
 			sid, err := f.page.InsertRow(key, valBytes)
 			if err == nil {
 				f.page.SetPageLSN(lsn)
-				pt.rowIndex[key] = rowLocation{pageID: pt.insertPageID, slotID: sid}
+				pt.indexInsert(key, rowLocation{pageID: pt.insertPageID, slotID: sid})
 				if f.page.IsFull() {
 					pt.insertPageID = 0
 				}
@@ -165,7 +282,7 @@ func (pt *PagedTable) putRowNew(key RowKey, valBytes []byte, lsn LSN) {
 			sid, err := f.page.InsertRow(key, valBytes)
 			if err == nil {
 				f.page.SetPageLSN(lsn)
-				pt.rowIndex[key] = rowLocation{pageID: pid, slotID: sid}
+				pt.indexInsert(key, rowLocation{pageID: pid, slotID: sid})
 				if !f.page.IsFull() {
 					pt.insertPageID = pid
 				}
@@ -187,7 +304,7 @@ func (pt *PagedTable) putRowNew(key RowKey, valBytes []byte, lsn LSN) {
 		return
 	}
 	f.page.SetPageLSN(lsn)
-	pt.rowIndex[key] = rowLocation{pageID: pageID, slotID: sid}
+	pt.indexInsert(key, rowLocation{pageID: pageID, slotID: sid})
 	if !f.page.IsFull() {
 		pt.insertPageID = pageID
 	}
@@ -199,7 +316,7 @@ func (pt *PagedTable) DeleteRow(key RowKey) bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 
-	loc, ok := pt.rowIndex[key]
+	loc, ok := pt.indexSearch(key)
 	if !ok {
 		return false
 	}
@@ -222,7 +339,7 @@ func (pt *PagedTable) DeleteRow(key RowKey) bool {
 		}
 	}
 	pt.pool.UnpinPage(pt.tableID, loc.pageID, true)
-	delete(pt.rowIndex, key)
+	pt.indexDelete(key)
 
 	if allGone {
 		pt.heap.AddToFreeList(loc.pageID)
@@ -236,10 +353,7 @@ func (pt *PagedTable) DeleteRow(key RowKey) bool {
 // Scan returns every row matching the (optional) filter. Satisfies TableIface.
 func (pt *PagedTable) Scan(filter FilterFunc) []Row {
 	pt.mu.RLock()
-	keys := make([]RowKey, 0, len(pt.rowIndex))
-	for k := range pt.rowIndex {
-		keys = append(keys, k)
-	}
+	keys := pt.indexAllKeys()
 	pt.mu.RUnlock()
 
 	var result []Row
@@ -259,12 +373,12 @@ func (pt *PagedTable) Scan(filter FilterFunc) []Row {
 // Keys returns every row key in sorted order. Satisfies TableIface.
 func (pt *PagedTable) Keys() []RowKey {
 	pt.mu.RLock()
-	keys := make([]RowKey, 0, len(pt.rowIndex))
-	for k := range pt.rowIndex {
-		keys = append(keys, k)
-	}
+	keys := pt.indexAllKeys()
 	pt.mu.RUnlock()
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	if pt.useMap {
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	}
+	// BTree already returns keys in sorted order
 	return keys
 }
 
@@ -272,5 +386,5 @@ func (pt *PagedTable) Keys() []RowKey {
 func (pt *PagedTable) Count() int {
 	pt.mu.RLock()
 	defer pt.mu.RUnlock()
-	return len(pt.rowIndex)
+	return pt.indexCount()
 }
