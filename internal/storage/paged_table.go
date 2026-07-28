@@ -85,8 +85,9 @@ func (pt *PagedTable) TableColumns() []Column { return pt.columns }
 // GetRow returns values for the given key. Satisfies TableIface.
 func (pt *PagedTable) GetRow(key RowKey) ([]types.Value, bool) {
 	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+
 	loc, ok := pt.rowIndex[key]
-	pt.mu.RUnlock()
 	if !ok {
 		return nil, false
 	}
