@@ -6,19 +6,14 @@ Require jq
 Set Shell "bash"
 Set FontSize 14
 Set Width 900
-Set Height 500
+Set Height 520
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 40ms
+Set TypingSpeed 35ms
 Set Padding 20
 
-Type "# Transaction Manager — live API demo"
-Sleep 500ms
+Type "# MVCC Snapshot Isolation — T2 sees a frozen snapshot"
 Enter
-Sleep 300ms
-
-Type "# 1. Begin two concurrent MVCC transactions"
-Enter
-Sleep 200ms
+Sleep 400ms
 
 Type `T1=$(curl -s -X POST localhost:8080/api/txn/begin \`
 Enter
@@ -26,7 +21,7 @@ Type `  -H 'Content-Type: application/json' \`
 Enter
 Type `  -d '{"protocol":"mvcc","isolation":"serializable"}' | jq -r .id)`
 Enter
-Sleep 800ms
+Sleep 600ms
 
 Type `T2=$(curl -s -X POST localhost:8080/api/txn/begin \`
 Enter
@@ -34,56 +29,54 @@ Type `  -H 'Content-Type: application/json' \`
 Enter
 Type `  -d '{"protocol":"mvcc","isolation":"serializable"}' | jq -r .id)`
 Enter
-Sleep 800ms
+Sleep 600ms
 
 Type `echo "T1=$T1  T2=$T2"`
 Enter
-Sleep 600ms
+Sleep 400ms
 
-Type "# 2. T1 writes account balance"
+Type "# T1 updates account 10: balance 10000 → 9000"
 Enter
-Sleep 200ms
-
 Type `curl -s -X POST localhost:8080/api/txn/$T1/write \`
 Enter
 Type `  -H 'Content-Type: application/json' \`
 Enter
-Type `  -d '{"table":"accounts","key":"1","values":[{"type":"int","int_val":9500}]}' | jq .`
+Type `  -d '{"table":"accounts","key":"10","values":[{"Type":1,"Int":10},{"Type":3,"Text":"owner-10"},{"Type":2,"Float":9000},{"Type":3,"Text":"central"}]}' \`
 Enter
-Sleep 1000ms
-
-Type "# 3. T2 reads the same row (sees old value — snapshot isolation)"
+Type `  | jq .`
 Enter
-Sleep 200ms
+Sleep 900ms
 
+Type "# T2 reads account 10 — sees 10000, not 9000 (snapshot isolation!)"
+Enter
 Type `curl -s -X POST localhost:8080/api/txn/$T2/read \`
 Enter
 Type `  -H 'Content-Type: application/json' \`
 Enter
-Type `  -d '{"table":"accounts","key":"1"}' | jq .`
+Type `  -d '{"table":"accounts","key":"10"}' \`
 Enter
-Sleep 1000ms
-
-Type "# 4. T1 commits, then T2 reads again (still sees snapshot)"
+Type `  | jq '{found:.found, balance:.values[2].Float}'`
 Enter
-Sleep 200ms
+Sleep 900ms
 
+Type "# T1 commits"
+Enter
 Type `curl -s -X POST localhost:8080/api/txn/$T1/commit | jq .`
 Enter
 Sleep 600ms
 
+Type "# T2 reads again AFTER T1 committed — still 10000 (snapshot preserved!)"
+Enter
 Type `curl -s -X POST localhost:8080/api/txn/$T2/read \`
 Enter
 Type `  -H 'Content-Type: application/json' \`
 Enter
-Type `  -d '{"table":"accounts","key":"1"}' | jq .`
+Type `  -d '{"table":"accounts","key":"10"}' \`
 Enter
-Sleep 1000ms
+Type `  | jq '{found:.found, balance:.values[2].Float}'`
+Enter
+Sleep 900ms
 
 Type `curl -s -X POST localhost:8080/api/txn/$T2/commit | jq .`
-Enter
-Sleep 600ms
-
-Type "# Done — two serializable MVCC transactions, zero conflicts"
 Enter
 Sleep 1200ms
