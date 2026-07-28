@@ -129,14 +129,6 @@ func (m *Manager) assignLSN() LSN {
 	return m.nextLSN.Add(1) - 1
 }
 
-// lastTxnLSN returns the last LSN recorded for txnID (for PrevLSN chain).
-func (m *Manager) lastTxnLSN(txnID uint64) LSN {
-	m.txnLSNmu.Lock()
-	lsn := m.txnLSN[txnID]
-	m.txnLSNmu.Unlock()
-	return lsn
-}
-
 // setTxnLSN records the last LSN for txnID.
 func (m *Manager) setTxnLSN(txnID uint64, lsn LSN) {
 	m.txnLSNmu.Lock()

@@ -86,7 +86,7 @@ type Node struct {
 
 // NewNode creates a new Raft node.
 func NewNode(id NodeID, peers map[NodeID]string, dataDir string, transport *TCPTransport, fsm FSM) (*Node, error) {
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("raft mkdir %s: %w", dataDir, err)
 	}
 

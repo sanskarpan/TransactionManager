@@ -55,7 +55,7 @@ type RaftLog struct {
 // On open: loads all entries from file.
 func NewRaftLog(dir string) (*RaftLog, error) {
 	path := filepath.Join(dir, "raft.log")
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("raft log open: %w", err)
 	}

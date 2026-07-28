@@ -74,7 +74,7 @@ func main() {
 	var walRec *wal.RecoveryResult
 	walDir := os.Getenv("WAL_DIR")
 	if walDir != "" {
-		if err := os.MkdirAll(walDir, 0750); err != nil {
+		if err := os.MkdirAll(walDir, 0o750); err != nil {
 			logger.Error("wal: failed to create WAL_DIR", "err", err)
 			return
 		}
@@ -83,7 +83,11 @@ func main() {
 			logger.Error("wal: failed to open WAL manager", "err", err)
 			return
 		}
-		defer walMgr.Close()
+		defer func() {
+			if err := walMgr.Close(); err != nil {
+				logger.Error("wal: close failed", "err", err)
+			}
+		}()
 		walWriter = walMgr
 		rec, err := wal.RunRecovery(walDir)
 		if err != nil {
@@ -142,8 +146,10 @@ func main() {
 			if err := pool.FlushAllDirty(); err != nil {
 				logger.Error("paged storage: flush dirty pages on shutdown", "err", err)
 			}
-			for _, h := range heaps {
-				_ = h.Close()
+			for name, h := range heaps {
+				if err := h.Close(); err != nil {
+					logger.Error("paged storage: close heap failed", "table", name, "err", err)
+				}
 			}
 		}()
 		logger.Info("paged storage ready", "pool_frames", poolSize, "tables", len(heaps))
