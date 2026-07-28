@@ -11,7 +11,7 @@ import (
 // noopFSM is an FSM that does nothing — suitable for election tests.
 type noopFSM struct{}
 
-func (n *noopFSM) Apply(_ Entry) error    { return nil }
+func (n *noopFSM) Apply(_ Entry) error       { return nil }
 func (n *noopFSM) Snapshot() ([]byte, error) { return []byte{}, nil }
 func (n *noopFSM) Restore(_ []byte) error    { return nil }
 

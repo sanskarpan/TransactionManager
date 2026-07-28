@@ -25,9 +25,9 @@ type TCPTransport struct {
 	stopCh chan struct{}
 
 	// Callbacks set by Node after transport is created.
-	OnRequestVote      func(NodeID, RequestVoteArgs) (RequestVoteReply, error)
-	OnAppendEntries    func(NodeID, AppendEntriesArgs) (AppendEntriesReply, error)
-	OnInstallSnapshot  func(NodeID, InstallSnapshotArgs) (InstallSnapshotReply, error)
+	OnRequestVote     func(NodeID, RequestVoteArgs) (RequestVoteReply, error)
+	OnAppendEntries   func(NodeID, AppendEntriesArgs) (AppendEntriesReply, error)
+	OnInstallSnapshot func(NodeID, InstallSnapshotArgs) (InstallSnapshotReply, error)
 }
 
 // NewTCPTransport binds the TCP listener. Does NOT start accepting yet.
