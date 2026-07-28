@@ -61,9 +61,17 @@ func (f *TxnManagerFSM) Apply(e Entry) error {
 		if t == nil {
 			return fmt.Errorf("raft fsm: txn %d not found for write", e.Command.TxnID)
 		}
-		vals, err := types.DecodeValues(e.Command.After)
-		if err != nil {
-			return err
+		// Guard against nil After (delete operations pass no after-image).
+		// DecodeValues requires at least 2 bytes; calling it with nil/empty
+		// bytes causes a "buffer too short" error and breaks all Raft-path
+		// deletes. Use nil vals directly when After is absent.
+		var vals []types.Value
+		if len(e.Command.After) > 0 {
+			var err error
+			vals, err = types.DecodeValues(e.Command.After)
+			if err != nil {
+				return err
+			}
 		}
 		proto := t.Protocol
 		if proto == txn.Protocol2PL {

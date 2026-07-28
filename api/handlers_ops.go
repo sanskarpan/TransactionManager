@@ -10,6 +10,24 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/types"
 )
 
+// raftWrite routes a write/insert/delete operation through Raft consensus when
+// RAFT_MODE is enabled. It returns (true, nil) if the Raft proposal succeeded,
+// (true, err) if Raft is enabled but the proposal failed, and (false, nil) when
+// Raft is not enabled so the caller should fall through to the direct path.
+func (s *Server) raftWrite(txnID txn.ID, table, key string, op uint8, values []types.Value) (handled bool, err error) {
+	if s.Raft == nil {
+		return false, nil
+	}
+	var after []byte
+	if len(values) > 0 {
+		after = types.EncodeValues(values)
+	}
+	if propErr := s.Raft.ProposeWrite(uint64(txnID), table, key, op, nil, after); propErr != nil {
+		return true, propErr
+	}
+	return true, nil
+}
+
 // RowOpRequest is the JSON body for read/write/scan operations.
 type RowOpRequest struct {
 	Table  string        `json:"table"`
@@ -65,6 +83,10 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
+	if s.raftLeaderCheck(w) {
+		return
+	}
+
 	id, err := parseTxnID(r)
 	if err != nil {
 		errResponse(w, http.StatusBadRequest, "invalid request")
@@ -103,6 +125,27 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Raft path: route the write through consensus. The FSM will apply the
+	// write on all nodes so local storage is mutated only after commit.
+	if handled, propErr := s.raftWrite(id, req.Table, req.Key, uint8(txn.UndoUpdate), req.Values); handled {
+		if propErr != nil {
+			if s.m != nil {
+				var txnErr *types.TxnError
+				if errors.As(propErr, &txnErr) && txnErr.Code == types.ErrWriteConflict {
+					s.m.WriteConflicts.Add(1)
+				}
+			}
+			s.logger.Error("raft write failed", "err", propErr, "req_id", reqIDFromCtx(r))
+			errWrite(w, propErr)
+			return
+		}
+		if s.m != nil {
+			s.m.WritesTotal.Add(1)
+		}
+		okJSON(w, map[string]interface{}{"ok": true})
+		return
+	}
+
 	s.txnMgr.WithRequestCtx(r.Context(), id, func() {
 		if t.Protocol == txn.ProtocolMVCC {
 			err = s.txnMgr.MVCCWrite(t, req.Table, req.Key, req.Values, txn.UndoUpdate)
@@ -131,6 +174,10 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInsert(w http.ResponseWriter, r *http.Request) {
+	if s.raftLeaderCheck(w) {
+		return
+	}
+
 	id, err := parseTxnID(r)
 	if err != nil {
 		errResponse(w, http.StatusBadRequest, "invalid request")
@@ -161,6 +208,20 @@ func (s *Server) handleInsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Raft path: route insert through consensus.
+	if handled, propErr := s.raftWrite(id, req.Table, req.Key, uint8(txn.UndoInsert), req.Values); handled {
+		if propErr != nil {
+			s.logger.Error("raft insert failed", "err", propErr, "req_id", reqIDFromCtx(r))
+			errWrite(w, propErr)
+			return
+		}
+		if s.m != nil {
+			s.m.WritesTotal.Add(1)
+		}
+		okJSON(w, map[string]interface{}{"ok": true})
+		return
+	}
+
 	s.txnMgr.WithRequestCtx(r.Context(), id, func() {
 		if t.Protocol == txn.ProtocolMVCC {
 			err = s.txnMgr.MVCCWrite(t, req.Table, req.Key, req.Values, txn.UndoInsert)
@@ -182,6 +243,10 @@ func (s *Server) handleInsert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if s.raftLeaderCheck(w) {
+		return
+	}
+
 	id, err := parseTxnID(r)
 	if err != nil {
 		errResponse(w, http.StatusBadRequest, "invalid request")
@@ -196,6 +261,20 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	var req RowOpRequest
 	if status, msg := decodeJSON(r, &req, true); status != 0 {
 		errResponse(w, status, msg)
+		return
+	}
+
+	// Raft path: route delete through consensus (nil values = delete marker).
+	if handled, propErr := s.raftWrite(id, req.Table, req.Key, uint8(txn.UndoDelete), nil); handled {
+		if propErr != nil {
+			s.logger.Error("raft delete failed", "err", propErr, "req_id", reqIDFromCtx(r))
+			errWrite(w, propErr)
+			return
+		}
+		if s.m != nil {
+			s.m.WritesTotal.Add(1)
+		}
+		okJSON(w, map[string]interface{}{"ok": true})
 		return
 	}
 

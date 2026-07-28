@@ -174,6 +174,12 @@ func (t *TCPTransport) SendInstallSnapshot(peer NodeID, addr string, args Instal
 }
 
 // Close closes the transport and all open connections.
+// Addr returns the actual listen address of the transport (host:port).
+// When the transport was created with ":0" this returns the OS-assigned port.
+func (t *TCPTransport) Addr() string {
+	return t.listener.Addr().String()
+}
+
 func (t *TCPTransport) Close() error {
 	close(t.stopCh)
 	t.mu.Lock()

@@ -15,8 +15,9 @@ func NewRaftAdapter(node *raft.Node) *RaftAdapter { return &RaftAdapter{node: no
 // IsLeader reports whether this node is the current Raft leader.
 func (a *RaftAdapter) IsLeader() bool { return a.node.IsLeader() }
 
-// LeaderAddr returns the current known leader's node ID as a string address hint.
-func (a *RaftAdapter) LeaderAddr() string { return string(a.node.LeaderID()) }
+// LeaderAddr returns the network address (host:port) of the current known
+// leader. This is a real connectable address, not a logical node ID.
+func (a *RaftAdapter) LeaderAddr() string { return a.node.LeaderAddr() }
 
 // ProposeBegin proposes a CmdBegin entry to the Raft cluster.
 func (a *RaftAdapter) ProposeBegin(txnID uint64, proto, iso uint8) error {

@@ -218,6 +218,25 @@ func (n *Node) LeaderID() NodeID {
 	return v.(NodeID)
 }
 
+// LeaderAddr returns the network address (host:port) of the current known
+// leader. When this node is the leader it returns its own transport address.
+// When the leader is a peer it looks up the peer's address in the peers map.
+// Returns an empty string if the leader is unknown.
+func (n *Node) LeaderAddr() string {
+	id := n.LeaderID()
+	if id == "" {
+		return ""
+	}
+	if id == n.id {
+		// This node is the leader; return its own listen address.
+		return n.transport.Addr()
+	}
+	n.mu.Lock()
+	addr := n.peers[id]
+	n.mu.Unlock()
+	return addr
+}
+
 // run is the main event loop.
 func (n *Node) run() {
 	defer close(n.done)
@@ -548,21 +567,19 @@ func (n *Node) applyCommitted() {
 			return
 		}
 
-		if err := n.fsm.Apply(e); err != nil {
-			// Log but continue; FSM errors are non-fatal for Raft.
-			_ = err
-		}
+		fsmErr := n.fsm.Apply(e)
 
 		n.mu.Lock()
 		n.lastApplied = applyIdx
 		shouldSnapshot := n.lastApplied-n.snapshotIndex >= 1000
 		n.mu.Unlock()
 
-		// Resolve pending proposal if any.
+		// Resolve pending proposal if any, propagating any FSM error so the
+		// HTTP handler can surface it rather than returning a false 200 OK.
 		n.pendingMu.Lock()
 		if pp, ok := n.pending[applyIdx]; ok {
 			delete(n.pending, applyIdx)
-			pp.result <- ProposalResult{Index: applyIdx}
+			pp.result <- ProposalResult{Index: applyIdx, Err: fsmErr}
 		}
 		n.pendingMu.Unlock()
 

@@ -10,6 +10,26 @@ import (
 	"github.com/sanskarpan/TransactionManager/internal/txn"
 )
 
+// raftLeaderCheck returns true and writes a 503 response when a Raft node is
+// configured and this node is not the leader. Handlers should return immediately
+// when this returns true.
+func (s *Server) raftLeaderCheck(w http.ResponseWriter) bool {
+	if s.Raft == nil {
+		return false // Raft not enabled; all nodes serve writes directly.
+	}
+	if s.Raft.IsLeader() {
+		return false // We are the leader; proceed.
+	}
+	leaderAddr := s.Raft.LeaderAddr()
+	w.Header().Set("Content-Type", "application/json")
+	if leaderAddr != "" {
+		w.Header().Set("X-Raft-Leader", leaderAddr)
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`{"error":"not leader","leader":"` + leaderAddr + `"}`))
+	return true
+}
+
 // BeginRequest is the JSON body for POST /api/txn/begin.
 //
 // LockTimeoutMs is in milliseconds; 0 (or omitted) selects the server
@@ -33,6 +53,10 @@ type BeginResponse struct {
 }
 
 func (s *Server) handleBegin(w http.ResponseWriter, r *http.Request) {
+	if s.raftLeaderCheck(w) {
+		return
+	}
+
 	var req BeginRequest
 	// H-07 + C-06: previously compared err.Error() != "EOF" by string;
 	// now routed through decodeJSON which handles io.EOF, MaxBytesError,
@@ -70,6 +94,45 @@ func (s *Server) handleBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Raft path: allocate an ID on the leader, propose CmdBegin, and let the
+	// FSM apply BeginWithID on all nodes (including this leader). The handler
+	// can safely return the pre-allocated ID because Propose blocks until the
+	// entry is committed and applied by the local FSM, so GetActiveTxn is
+	// guaranteed to find the transaction after a successful ProposeBegin.
+	if s.Raft != nil {
+		txnID := s.txnMgr.AllocateTxnID()
+		var protoU8, isoU8 uint8
+		if proto == txn.ProtocolMVCC {
+			protoU8 = 1
+		}
+		isoU8 = uint8(iso)
+		if err := s.Raft.ProposeBegin(uint64(txnID), protoU8, isoU8); err != nil {
+			s.logger.Error("raft propose begin failed", "err", err, "req_id", reqIDFromCtx(r))
+			errWrite(w, err)
+			return
+		}
+		// Propose blocks until the FSM has applied BeginWithID, so the txn
+		// is guaranteed to be active here. A nil result would indicate an
+		// FSM/apply-loop bug rather than a race.
+		t := s.txnMgr.GetActiveTxn(txnID)
+		if t == nil {
+			s.logger.Error("raft begin: txn not active after successful propose", "txn_id", uint64(txnID), "req_id", reqIDFromCtx(r))
+			errResponse(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		s.sseBus.Publish(SSEEvent{Event: "txn_begin", Data: map[string]interface{}{
+			"id":       uint64(txnID),
+			"protocol": req.Protocol,
+		}})
+		okJSON(w, BeginResponse{
+			ID:        uint64(txnID),
+			Protocol:  req.Protocol,
+			Isolation: req.Isolation,
+			BeginAt:   t.BeginAt.Format(time.RFC3339Nano),
+		})
+		return
+	}
+
 	t, err := s.txnMgr.Begin(proto, iso, timeout)
 	if err != nil {
 		s.logger.Error("txn op failed", "err", err, "req_id", reqIDFromCtx(r))
@@ -102,9 +165,25 @@ func (s *Server) handleBegin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
+	if s.raftLeaderCheck(w) {
+		return
+	}
+
 	id, err := parseTxnID(r)
 	if err != nil {
 		errResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	// Raft path: propose CmdCommit and let the FSM apply mgr.Commit.
+	if s.Raft != nil {
+		if err := s.Raft.ProposeCommit(uint64(id)); err != nil {
+			s.logger.Error("raft propose commit failed", "err", err, "req_id", reqIDFromCtx(r))
+			errWrite(w, err)
+			return
+		}
+		s.sseBus.Publish(SSEEvent{Event: "txn_commit", Data: map[string]interface{}{"id": uint64(id)}})
+		okJSON(w, map[string]interface{}{"id": uint64(id), "status": "committed"})
 		return
 	}
 
@@ -127,9 +206,25 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
+	if s.raftLeaderCheck(w) {
+		return
+	}
+
 	id, err := parseTxnID(r)
 	if err != nil {
 		errResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	// Raft path: propose CmdAbort and let the FSM apply mgr.Abort.
+	if s.Raft != nil {
+		if err := s.Raft.ProposeAbort(uint64(id)); err != nil {
+			s.logger.Error("raft propose abort failed", "err", err, "req_id", reqIDFromCtx(r))
+			errWrite(w, err)
+			return
+		}
+		s.sseBus.Publish(SSEEvent{Event: "txn_abort", Data: map[string]interface{}{"id": uint64(id)}})
+		okJSON(w, map[string]interface{}{"id": uint64(id), "status": "aborted"})
 		return
 	}
 

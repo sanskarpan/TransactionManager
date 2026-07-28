@@ -6,6 +6,10 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/sanskarpan/TransactionManager/internal/storage"
+	"github.com/sanskarpan/TransactionManager/internal/txn"
+	"github.com/sanskarpan/TransactionManager/internal/types"
 )
 
 // noopFSM is an FSM that does nothing — suitable for election tests.
@@ -296,5 +300,283 @@ func TestRaft3NodeCluster(t *testing.T) {
 		if ci := node.commitIndex.Load(); ci < 5 {
 			t.Errorf("node %d commitIndex = %d, want >= 5", i, ci)
 		}
+	}
+}
+
+// TestRaftMode_SingleNode_Propose starts a single-node cluster using
+// TxnManagerFSM and verifies that proposing CmdBegin causes the FSM to apply
+// BeginWithID so the transaction is visible in the manager.
+func TestRaftMode_SingleNode_Propose(t *testing.T) {
+	dir, err := os.MkdirTemp("", "raft-single-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	transport, err := NewTCPTransport("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	defer transport.Close()
+
+	catalog := storage.NewCatalog()
+	mgr := txn.NewManager(catalog)
+	fsm := NewTxnManagerFSM(mgr)
+
+	node, err := NewNode("node1", map[NodeID]string{}, dir, transport, fsm)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	if err := node.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer node.Stop()
+
+	// Wait for leadership (single-node cluster converges quickly).
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.IsLeader() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !node.IsLeader() {
+		t.Fatal("single-node cluster did not become leader within 1s")
+	}
+
+	// Allocate a txn ID and propose CmdBegin.
+	txnID := mgr.AllocateTxnID()
+	cmd := Command{
+		Type:  CmdBegin,
+		TxnID: uint64(txnID),
+		Proto: 0, // 2PL
+		Iso:   0, // ReadCommitted
+	}
+	result := node.Propose(cmd)
+	if result.Err != nil {
+		t.Fatalf("Propose CmdBegin failed: %v", result.Err)
+	}
+	if result.Index == 0 {
+		t.Error("Propose returned zero index")
+	}
+
+	// The FSM should have applied BeginWithID, so the txn is now active.
+	activeTxn := mgr.GetActiveTxn(txnID)
+	if activeTxn == nil {
+		t.Fatalf("expected active txn %d after Propose(CmdBegin), got nil", txnID)
+	}
+	if activeTxn.ID != txnID {
+		t.Errorf("txn ID mismatch: got %d, want %d", activeTxn.ID, txnID)
+	}
+
+	// Propose CmdAbort to clean up.
+	abortResult := node.Propose(Command{Type: CmdAbort, TxnID: uint64(txnID)})
+	if abortResult.Err != nil {
+		t.Errorf("Propose CmdAbort failed: %v", abortResult.Err)
+	}
+}
+
+// TestRaftMode_CmdWrite_Commit verifies the full write path through the FSM:
+// CmdBegin → CmdWrite (insert) → CmdCommit all applied without error.
+func TestRaftMode_CmdWrite_Commit(t *testing.T) {
+	dir, err := os.MkdirTemp("", "raft-write-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	transport, err := NewTCPTransport("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	defer transport.Close()
+
+	catalog := storage.NewCatalog()
+	tbl := storage.NewTable("accounts", []storage.Column{
+		{Name: "balance", Type: types.TypeInt},
+	})
+	catalog.Register(tbl)
+	mgr := txn.NewManager(catalog)
+	fsm := NewTxnManagerFSM(mgr)
+
+	node, err := NewNode("node1", map[NodeID]string{}, dir, transport, fsm)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	if err := node.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer node.Stop()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.IsLeader() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !node.IsLeader() {
+		t.Fatal("single-node cluster did not become leader within 1s")
+	}
+
+	// CmdBegin
+	txnID := mgr.AllocateTxnID()
+	if res := node.Propose(Command{Type: CmdBegin, TxnID: uint64(txnID), Proto: 0, Iso: 0}); res.Err != nil {
+		t.Fatalf("CmdBegin failed: %v", res.Err)
+	}
+
+	// CmdWrite (insert) — non-nil values encode correctly
+	vals := []types.Value{{Type: types.TypeInt, Int: 1000}}
+	after := types.EncodeValues(vals)
+	writeRes := node.Propose(Command{
+		Type:   CmdWrite,
+		TxnID:  uint64(txnID),
+		Table:  "accounts",
+		RowKey: "alice",
+		Op:     uint8(txn.UndoInsert),
+		After:  after,
+	})
+	if writeRes.Err != nil {
+		t.Fatalf("CmdWrite failed: %v", writeRes.Err)
+	}
+
+	// CmdCommit
+	if res := node.Propose(Command{Type: CmdCommit, TxnID: uint64(txnID)}); res.Err != nil {
+		t.Fatalf("CmdCommit failed: %v", res.Err)
+	}
+
+	// Verify the committed data is visible in the table.
+	row, found := tbl.GetRow(storage.RowKey("alice"))
+	if !found {
+		t.Fatal("row 'alice' not found in table after commit")
+	}
+	if len(row) == 0 || row[0].Int != 1000 {
+		t.Errorf("row value mismatch: got %v, want [{Int:1000}]", row)
+	}
+}
+
+// TestRaftMode_CmdWrite_Delete verifies that CmdWrite with nil After (delete)
+// does not crash the FSM with "buffer too short". Regression test for the
+// DecodeValues(nil) bug where handleDelete passed nil values to raftWrite.
+func TestRaftMode_CmdWrite_Delete(t *testing.T) {
+	dir, err := os.MkdirTemp("", "raft-delete-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	transport, err := NewTCPTransport("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	defer transport.Close()
+
+	catalog := storage.NewCatalog()
+	tbl := storage.NewTable("accounts", []storage.Column{
+		{Name: "balance", Type: types.TypeInt},
+	})
+	catalog.Register(tbl)
+	mgr := txn.NewManager(catalog)
+	fsm := NewTxnManagerFSM(mgr)
+
+	node, err := NewNode("node1", map[NodeID]string{}, dir, transport, fsm)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	if err := node.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer node.Stop()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.IsLeader() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !node.IsLeader() {
+		t.Fatal("single-node cluster did not become leader within 1s")
+	}
+
+	// Seed a row directly so we have something to delete.
+	tbl.PutRow(storage.RowKey("bob"), []types.Value{{Type: types.TypeInt, Int: 500}})
+
+	// CmdBegin
+	txnID := mgr.AllocateTxnID()
+	if res := node.Propose(Command{Type: CmdBegin, TxnID: uint64(txnID), Proto: 0, Iso: 0}); res.Err != nil {
+		t.Fatalf("CmdBegin failed: %v", res.Err)
+	}
+
+	// CmdWrite (delete) — After is nil, must not crash with "buffer too short".
+	deleteRes := node.Propose(Command{
+		Type:   CmdWrite,
+		TxnID:  uint64(txnID),
+		Table:  "accounts",
+		RowKey: "bob",
+		Op:     uint8(txn.UndoDelete),
+		After:  nil, // delete: no after-image
+	})
+	if deleteRes.Err != nil {
+		t.Fatalf("CmdWrite (delete) failed: %v", deleteRes.Err)
+	}
+
+	// CmdCommit
+	if res := node.Propose(Command{Type: CmdCommit, TxnID: uint64(txnID)}); res.Err != nil {
+		t.Fatalf("CmdCommit failed: %v", res.Err)
+	}
+}
+
+// TestRaftMode_FSMError_Propagated verifies that FSM errors are propagated
+// back to the Propose caller (not silently discarded) so the HTTP handler
+// receives the error instead of a false 200 OK.
+func TestRaftMode_FSMError_Propagated(t *testing.T) {
+	dir, err := os.MkdirTemp("", "raft-fsmerr-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	transport, err := NewTCPTransport("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	defer transport.Close()
+
+	catalog := storage.NewCatalog()
+	mgr := txn.NewManager(catalog)
+	fsm := NewTxnManagerFSM(mgr)
+
+	node, err := NewNode("node1", map[NodeID]string{}, dir, transport, fsm)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	if err := node.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer node.Stop()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.IsLeader() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !node.IsLeader() {
+		t.Fatal("single-node cluster did not become leader within 1s")
+	}
+
+	// Propose CmdWrite for a txn that does not exist — FSM returns an error.
+	res := node.Propose(Command{
+		Type:   CmdWrite,
+		TxnID:  9999,
+		Table:  "accounts",
+		RowKey: "x",
+		Op:     uint8(txn.UndoInsert),
+		After:  types.EncodeValues([]types.Value{{Type: types.TypeInt, Int: 1}}),
+	})
+	if res.Err == nil {
+		t.Fatal("expected FSM error for write on non-existent txn, got nil")
 	}
 }
